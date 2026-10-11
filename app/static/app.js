@@ -45,6 +45,7 @@ function updateVisibility(){
     beat_flash:'Color bulbs flash sharply with the music. Listening starts when you press Start.',
     music_brightness:'Every dimmable bulb follows the music using brightness only; colors stay as they are.'}[s.mode]||'';
   $('triggerHelp').textContent={bpm:'Pulses land on the detected beat. Until the tempo locks, they follow drum hits.',
+    beat_drums:'A steady pulse on every beat that keeps going through missed hits and breakdowns. Kicks and snares pull it onto the real drums; rolls add faster flashes on top.',
     percussion:'Pulses on drum hits, faster during rolls.',
     bands:'Kicks drive the pulses. When the kick drops out, snares and claps take over.',
     frequency:'Pulses when the bass, or the mids while the bass is quiet, crosses a volume level.'}[s.flash_trigger]||'';
@@ -62,7 +63,7 @@ function updateTempo(){
   if(manual){value=formatBpm(Number(s.bpm));text='Manual tempo.'}
   else if(!audio.running)text=MUSIC_MODES.includes(s.mode)?'Listening starts when you press Start.':'Not listening.';
   else if(audio.warming_up)text='Listening… the first tempo arrives in about 6 seconds.';
-  else if(!audio.bpm)text=s.flash_trigger==='bpm'?'Finding the beat… pulses follow drum hits meanwhile.':'Finding the beat…';
+  else if(!audio.bpm)text=['bpm','beat_drums'].includes(s.flash_trigger)?'Finding the beat… pulses follow drum hits meanwhile.':'Finding the beat…';
   else{value=formatBpm(audio.bpm);text=(audio.tempo_locked?'Locked':'Settling')+(audio.tempo_scale!==1?` · ${audio.tempo_scale>1?'×2':'½'} applied for this song`:'')+'. Wrong by double or half? Use ½ or ×2.'}
   $('tempoValue').textContent=value;$('tempoState').textContent=text;
   $('tempoHalf').disabled=$('tempoDouble').disabled=manual||!audio.bpm;
@@ -96,14 +97,34 @@ const ROLE_NAMES={'':'Unassigned',COLOR_LEFT:'Color · left',COLOR_RIGHT:'Color 
 function renderLights(){const root=$('lights');root.replaceChildren();state.lights.forEach(light=>{const card=document.createElement('div');card.className='bulb';card.dataset.id=light.id;const orb=document.createElement('div');orb.className='orb';const name=document.createElement('input');name.type='text';name.value=light.name;name.setAttribute('aria-label','Bulb name');const capability=document.createElement('small');capability.textContent=(light.color?'Color':'White')+(light.dimming?' · dimmable':'')+(light.temperature?' · temperature':'');const enabled=document.createElement('input');enabled.type='checkbox';enabled.checked=light.enabled;const label=document.createElement('label');label.append(enabled,document.createTextNode(' Use this bulb'));const select=document.createElement('select');select.setAttribute('aria-label','Bulb role');roles.forEach(role=>{const option=document.createElement('option');option.value=role;option.textContent=ROLE_NAMES[role];option.disabled=role.startsWith('COLOR')&&!light.color;select.append(option)});select.value=light.role||'';const save=safe(async()=>{const settings={name:name.value,enabled:enabled.checked,role:select.value||null};await queueWrite(()=>api('/lights/'+light.id,'PUT',settings));await refresh(false)});name.onchange=save;enabled.onchange=save;select.onchange=save;const identify=document.createElement('button');identify.textContent='Identify';identify.onclick=safe(async()=>{await api('/lights/'+light.id+'/identify','POST');notice('Identify command sent'+(state.mock?' (simulated)':''))});card.append(orb,name,capability,label,select,identify);root.append(card)});updateOrbs()}
 function updateOrbs(){document.querySelectorAll('.bulb').forEach(card=>{const light=state.lights.find(l=>l.id===card.dataset.id);if(!light)return;const i=light.role==='COLOR_RIGHT'?1:0;card.style.setProperty('--glow',light.color?(light.preview_color||state.palette[i%state.palette.length]):'#ffe1a8');card.style.setProperty('--power',light.on?Math.max(.15,light.brightness/100):.1)})}
 
+// rekordbox decks: square covers side by side; the live deck is the one the lights follow.
+function renderDecks(info){const status=$('deckStatus'),panel=$('decks');
+  if(!info){status.hidden=true;panel.hidden=true;return}
+  const notes=[info.history,
+    !info.connected&&info.controller?`${info.reason||info.controller+' not connected'} · volume unknown`:null,
+    info.connected&&!info.active?`${info.controller} connected · move a fader or the crossfader`:null].filter(Boolean);
+  status.textContent=notes.join(' · ');status.hidden=!notes.length;
+  panel.hidden=!info.decks.length;
+  for(const d of info.decks){const card=panel.querySelector(`[data-deck="${d.deck}"]`);if(!card)continue;
+    card.classList.toggle('live',d.live);
+    const art=card.querySelector('.deck-art'),url=d.artwork?`url("${d.artwork}")`:'';
+    if(art.dataset.url!==url){art.style.backgroundImage=url;art.dataset.url=url;art.querySelector('span').hidden=!!url}
+    card.querySelector('.deck-title').textContent=d.track||(d.loaded?'Loaded, not playing':d.waiting?'Identifying…':'Unknown · load a track to identify');
+    card.querySelector('.deck-artist').textContent=d.artist||'';
+    const volume=Math.round(d.volume*100),meter=card.querySelector('.deck-volume');
+    meter.querySelector('span').style.width=volume+'%';meter.setAttribute('aria-valuenow',volume)}
+  const knob=panel.querySelector('.crossfader span');knob.hidden=info.crossfader==null;
+  if(info.crossfader!=null)knob.style.left=(info.crossfader*100)+'%'}
 // ---- Music artwork events.
+const SOURCE_NAMES={apple_music:'Apple Music',rekordbox:'rekordbox'};
 let musicEvents=null,lastMusicRevision=-1;
-function renderMusicUpdate(update){if(update.revision<lastMusicRevision)return;lastMusicRevision=update.revision;const track=update.track;$('musicStatus').textContent=update.error||(track?`${track.artist} — ${track.track}${track.album?' · '+track.album:''}`:'');if(update.artwork!==refresh.lastArtwork){$('cover').style.backgroundImage=update.artwork?`url("${update.artwork}")`:'';$('cover').replaceChildren();if(!update.artwork){const span=document.createElement('span');span.textContent=track?'Loading Apple Music artwork…':'Drop an album into your evening';$('cover').append(span)}refresh.lastArtwork=update.artwork}if(update.palette&&JSON.stringify(update.palette)!==refresh.lastPalette){state.palette=update.palette;renderPalette();refresh.lastPalette=JSON.stringify(update.palette)}}
+function renderMusicUpdate(update){if(update.revision<lastMusicRevision)return;lastMusicRevision=update.revision;const track=update.track;$('musicStatus').textContent=update.error||(track?`${track.deck?`Deck ${track.deck} · `:''}${track.artist} — ${track.track}${track.album?' · '+track.album:''}`:'');if(update.artwork!==refresh.lastArtwork){$('cover').style.backgroundImage=update.artwork?`url("${update.artwork}")`:'';$('cover').replaceChildren();if(!update.artwork){const span=document.createElement('span');span.textContent=track?`Loading ${SOURCE_NAMES[state?.music_source]||'Music'} artwork…`:'Drop an album into your evening';$('cover').append(span)}refresh.lastArtwork=update.artwork}if(update.palette&&JSON.stringify(update.palette)!==refresh.lastPalette){state.palette=update.palette;renderPalette();refresh.lastPalette=JSON.stringify(update.palette)}}
 
 async function refresh(full=false){
   state=await api('/state');
+  renderDecks(state.decks);
   $('status').textContent=(state.mock?'Simulation':'Live Hue')+' · '+(STATUS[state.status]||state.status);
-  $('connectionInfo').textContent=state.error||state.playback_message||(state.streaming?'Entertainment streaming active':state.streaming_key_configured?'REST + Entertainment ready':'REST ready · add HUE_CLIENT_KEY for beat effects')+(state.music_enabled?' · Music sync enabled':'');
+  $('connectionInfo').textContent=state.error||state.playback_message||(state.streaming?'Entertainment streaming active':state.streaming_key_configured?'REST + Entertainment ready':'REST ready · add HUE_CLIENT_KEY for beat effects')+(state.music_enabled?` · ${SOURCE_NAMES[state.music_source]||'Music'} sync enabled`:'');
   if(state.error||state.playback_message)$('status').title=state.error||state.playback_message;
   $('bridge_id').style.display=state.bridge?.verify_tls?'':'none';
   if(state.bridge){if(!$('ip').value)$('ip').value=state.bridge.ip;if(!$('bridge_id').value)$('bridge_id').value=state.bridge.id}
@@ -119,7 +140,7 @@ document.querySelectorAll('[data-setting],input[type=radio]').forEach(el=>{
   el.addEventListener('input',()=>{updateOutputs();updateVisibility()});
   el.addEventListener('change',()=>{
     // Drum triggers start with drum stems on, so notes do not pulse.
-    if(el.name==='flash_trigger'&&['percussion','bands'].includes(el.value))document.querySelector('[data-setting="drum_isolation"]').checked=true;
+    if(el.name==='flash_trigger'&&['beat_drums','percussion','bands'].includes(el.value))document.querySelector('[data-setting="drum_isolation"]').checked=true;
     if(el.dataset.setting==='palette_size')return;
     updateVisibility();saveSettings().then(updateTempo);
   });
@@ -157,7 +178,7 @@ async function initialSetupCheck(){
   if(!devices.some(device=>device.loopback))problems.push('no BlackHole input');
   if(route&&route.available&&!route.routed)problems.push('Mac sound is not routed through BlackHole');
   if(state&&!state.mock&&!state.lights.length)problems.push('no bridge paired');
-  $('setupSummary').textContent=problems.length?'Needs attention: '+problems.join(', '):'Audio input, bridge and Apple Music';
+  $('setupSummary').textContent=problems.length?'Needs attention: '+problems.join(', '):'Audio input, bridge and music source';
   if(problems.length&&!setupOpened){$('setupPanel').open=true;setupOpened=true}
 }
 safe(async()=>{await refresh(true);await initialSetupCheck()})();

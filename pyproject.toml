@@ -8,6 +8,7 @@ requires-python = ">=3.11"
 dependencies = ["fastapi", "uvicorn", "pydantic", "pillow", "numpy", "scikit-learn", "httpx", "python-multipart", "python-dotenv", "scipy", "sounddevice"]
 [project.optional-dependencies]
 dev = ["pytest"]
+rekordbox = ["pyrekordbox", "sqlcipher3-wheels", "python-rtmidi"]
 [tool.setuptools.packages.find]
 include = ["app*"]
 [tool.setuptools.package-data]

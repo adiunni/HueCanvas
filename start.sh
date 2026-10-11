@@ -20,5 +20,10 @@ if ! .venv/bin/python -c 'import uvicorn; from importlib.metadata import version
     .venv/bin/python -m pip install -e '.[dev]'
 fi
 
+if grep -qi '^REKORDBOX_ENABLED=true' .env 2>/dev/null && ! .venv/bin/python -c 'import pyrekordbox, sqlcipher3, rtmidi' >/dev/null 2>&1; then
+    printf '%s\n' 'Installing rekordbox support in .venv...'
+    .venv/bin/python -m pip install -e '.[dev,rekordbox]'
+fi
+
 printf '%s\n' "Starting HueCanvas at http://127.0.0.1:${PORT:-8000}" 'Press Ctrl+C to stop.'
 exec .venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port "${PORT:-8000}" --timeout-graceful-shutdown 5 "$@"

@@ -27,6 +27,12 @@
   </div>
   <div id="palette"></div>
   <p id="musicStatus" class="hint" role="status"></p>
+  <div id="decks" class="decks" hidden>
+    <figure class="deck" data-deck="1"><div class="deck-art"><span>Deck 1</span></div><figcaption><small>DECK 1</small><b class="deck-title"></b><span class="deck-artist"></span><div class="deck-volume" role="meter" aria-label="Deck 1 volume" aria-valuemin="0" aria-valuemax="100"><span></span></div></figcaption></figure>
+    <figure class="deck" data-deck="2"><div class="deck-art"><span>Deck 2</span></div><figcaption><small>DECK 2</small><b class="deck-title"></b><span class="deck-artist"></span><div class="deck-volume" role="meter" aria-label="Deck 2 volume" aria-valuemin="0" aria-valuemax="100"><span></span></div></figcaption></figure>
+    <div class="crossfader" title="Crossfader"><span></span></div>
+  </div>
+  <p id="deckStatus" class="hint" hidden></p>
   <small>Click a swatch to change it.</small>
 </section>
 
@@ -74,13 +80,14 @@
     <fieldset class="choices triggers">
       <legend>Pulses follow</legend>
       <label><input type="radio" name="flash_trigger" value="bpm"><span>Beat<small>Tempo clock</small></span></label>
+      <label><input type="radio" name="flash_trigger" value="beat_drums"><span>Beat + drums<small>Clock locked to kicks</small></span></label>
       <label><input type="radio" name="flash_trigger" value="percussion"><span>Drums<small>Hits, rolls, drops</small></span></label>
       <label><input type="radio" name="flash_trigger" value="bands"><span>Kick, or snares<small>Mids when bass drops out</small></span></label>
       <label><input type="radio" name="flash_trigger" value="frequency"><span>Levels<small>Bass / mid volume</small></span></label>
     </fieldset>
     <p id="triggerHelp" class="hint"></p>
 
-    <div class="sub" data-triggers="percussion bands">
+    <div class="sub" data-triggers="beat_drums percussion bands">
       <label class="check"><input type="checkbox" data-setting="drum_isolation" data-on="stems" data-off="fast"> Ignore melody and bass notes <small>Drum stems · about 50 ms later</small></label>
       <label>Sensitivity <output data-for="flash_sensitivity"></output><input data-setting="flash_sensitivity" type="range" min="1" max="100"></label>
       <label data-modes="beat_flash">Fastest roll flashes · per second <output data-for="roll_max_hz"></output><input data-setting="roll_max_hz" type="range" min="3" max="8" step="1"></label>
@@ -164,7 +171,7 @@
 </details>
 
 <details class="panel setup" id="setupPanel">
-  <summary><h2>Setup</h2><span class="summary-note" id="setupSummary">Audio input, bridge and Apple Music</span></summary>
+  <summary><h2>Setup</h2><span class="summary-note" id="setupSummary">Audio input, bridge and music source</span></summary>
   <h3>Audio input</h3>
   <p>Route Mac sound through a Multi-Output Device that includes your speakers and BlackHole 2ch. HueCanvas listens to BlackHole when you press Start on a music look. Nothing is recorded.</p>
   <div class="connection"><select id="audioDevice" aria-label="Audio input"><option value="">Choose audio input</option></select><button id="audioDevices">Refresh inputs</button><button id="audioListen">Listen now</button><button id="audioStop">Stop listening</button></div>
@@ -174,8 +181,8 @@
   <p id="audioStatus" role="status">Not listening. No audio is recorded to disk.</p>
   <p id="hitStatus" class="fine" role="status"></p>
   <h3>Hue Bridge &amp; Music</h3>
-  <div class="connection"><button id="discover">Find bridge</button><input id="ip" placeholder="Bridge IP" aria-label="Bridge IP"><input id="bridge_id" placeholder="Bridge ID (verified TLS only)" aria-label="Bridge ID (verified TLS only)"><button id="pair">Pair after pressing bridge button</button><button id="music">Current Music track</button></div>
-  <p id="connectionInfo">Simulation works without a Hue Bridge or Apple Music. Fast beat effects use Hue Entertainment streaming.</p>
+  <div class="connection"><button id="discover">Find bridge</button><input id="ip" placeholder="Bridge IP" aria-label="Bridge IP"><input id="bridge_id" placeholder="Bridge ID (verified TLS only)" aria-label="Bridge ID (verified TLS only)"><button id="pair">Pair after pressing bridge button</button><button id="music">Current track</button></div>
+  <p id="connectionInfo">Simulation works without a Hue Bridge, Apple Music or rekordbox. Fast beat effects use Hue Entertainment streaming.</p>
 </details>
 </main>
 <div id="notice" role="status" aria-live="polite"></div><script src="/static/app.js"></script><script src="/static/spectrum.js"></script></body></html>

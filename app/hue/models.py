@@ -31,7 +31,7 @@ class Settings(BaseModel):
     bpm_source: Literal['manual', 'audio'] = 'audio'
     flash_low: float = Field(default=20, ge=0, le=80)
     beat_every: Literal[1, 2, 4] = 1
-    flash_trigger: Literal['bpm', 'percussion', 'bands', 'frequency', 'bass', 'bass_drums'] = 'bpm'
+    flash_trigger: Literal['bpm', 'beat_drums', 'percussion', 'bands', 'frequency', 'bass', 'bass_drums'] = 'bpm'
     flash_pattern: Literal['together', 'staggered'] = 'together'
     roll_max_hz: float = Field(default=8, ge=3, le=8)
     flash_sensitivity: float = Field(default=50, ge=1, le=100)

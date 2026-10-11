@@ -68,3 +68,19 @@ details.panel[open]>summary{margin-bottom:16px}
 .fine{font-size:12.5px}
 @media(max-width:800px){.column{display:contents}.art{order:1}.lighting{order:2}.color-lights{order:3}.white-lights{order:4}.room{order:5}.spectrum{order:6}.setup{order:7}.transport{justify-content:flex-start}header{padding:20px 16px}main{padding:0 16px 40px}.banner{margin:0 16px 16px}}
 @media(max-width:450px){.tempo{flex-direction:column;align-items:flex-start}.choices{grid-template-columns:1fr 1fr}}
+
+/* rekordbox decks: square covers side by side; the live deck drives the lights */
+.decks{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:4px 0 14px}
+.deck{margin:0;min-width:0;background:#15181e;border:1px solid #2b2f37;border-radius:12px;padding:10px;opacity:.6;transition:border-color .3s,opacity .3s}
+.deck.live{border-color:var(--accent);opacity:1;box-shadow:0 0 0 1px var(--accent)}
+.deck-art{aspect-ratio:1/1;border-radius:8px;background:#30353b center/cover no-repeat;display:flex;align-items:center;justify-content:center}
+.deck-art span{font-size:12px;color:#fff6}
+.deck figcaption{margin-top:9px;font-size:12px;color:var(--muted);min-width:0}
+.deck figcaption small{display:flex;justify-content:space-between;letter-spacing:1.5px;font-size:10.5px}
+.deck.live figcaption small::after{content:'LIVE';color:var(--accent)}
+.deck-title,.deck-artist{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.deck-title{color:#f3f0ed;font-size:13px;font-weight:600;margin-top:3px}
+.deck-volume{height:4px;background:#2b2f37;border-radius:2px;margin-top:8px;overflow:hidden}
+.deck-volume span{display:block;height:100%;width:0;background:var(--accent);transition:width .25s}
+.crossfader{grid-column:1/-1;position:relative;height:4px;background:#2b2f37;border-radius:2px;margin:6px 10px 0}
+.crossfader span{position:absolute;top:-5px;left:50%;width:14px;height:14px;border-radius:3px;background:#d9d7d3;transform:translateX(-50%);transition:left .25s}

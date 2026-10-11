@@ -21,6 +21,9 @@ from app.animation.engine import Engine
 from app.animation.beats import palette_color
 from app.palette.extract import extract_palette
 from app.music.apple_music import AppleMusic
+from app.music.rekordbox import Rekordbox
+from app.music.decks import DeckMixer
+from app.music.controller import ControllerInput
 from app.music.sync import ArtworkSync
 from app.audio.live import LiveBPM, input_devices
 from app.audio.routing import routing_status, set_music_output
@@ -33,7 +36,12 @@ music_track = None
 music_error = None
 music_revision = 0
 music_subscribers = set()
-music = AppleMusic()
+def music_provider():
+    if config.MUSIC_SOURCE!='rekordbox':return AppleMusic()
+    if not config.REKORDBOX_CONTROLLER:return Rekordbox()
+    mixer=DeckMixer()
+    return Rekordbox(mixer=mixer,controller=ControllerInput(mixer,config.REKORDBOX_CONTROLLER),state_path=config.DATA_DIR/'decks.json')
+music = music_provider()
 audio = LiveBPM()
 
 def real_client(ip=None, bridge_id=None):
@@ -111,6 +119,8 @@ async def lifespan(app):
         if t:
             t.cancel()
             with suppress(asyncio.CancelledError): await t
+    if hasattr(music,'close'):
+        with suppress(Exception): await music.close()
     await audio.stop()
     with suppress(Exception): await engine.stop()
     await engine.client.close()
@@ -137,7 +147,7 @@ async def value_error(request, exc):
     return JSONResponse({'detail':str(exc)},status_code=400)
 @app.get('/api/state')
 async def state():
-    return {'mock':config.MOCK_MODE,'bridge':{'ip':os.getenv('HUE_BRIDGE_IP',''),'id':getattr(engine.client,'bridge_id',''),'verify_tls':getattr(engine.client,'verify_tls',False)} if not config.MOCK_MODE else None,'lights':[l.model_dump() for l in engine.lights], 'settings':engine.settings.model_dump(),'palette':engine.palette,'status':engine.status,'playback_message':engine.playback_message,'error':engine.error or engine.rest_error,'artwork':artwork_url(),'music_track':music_track,'music_error':music_error,'music_revision':music_revision,'entertainment':True,'streaming':engine.stream is not None,'streaming_key_configured':config.MOCK_MODE or bool(getattr(engine.client,'client_key','')),'audio':audio.status(),'music_enabled':config.MUSIC_ENABLED}
+    return {'mock':config.MOCK_MODE,'bridge':{'ip':os.getenv('HUE_BRIDGE_IP',''),'id':getattr(engine.client,'bridge_id',''),'verify_tls':getattr(engine.client,'verify_tls',False)} if not config.MOCK_MODE else None,'lights':[l.model_dump() for l in engine.lights], 'settings':engine.settings.model_dump(),'palette':engine.palette,'status':engine.status,'playback_message':engine.playback_message,'error':engine.error or engine.rest_error,'artwork':artwork_url(),'music_track':music_track,'music_error':music_error,'music_revision':music_revision,'entertainment':True,'streaming':engine.stream is not None,'streaming_key_configured':config.MOCK_MODE or bool(getattr(engine.client,'client_key','')),'audio':audio.status(),'music_enabled':config.MUSIC_ENABLED,'music_source':config.MUSIC_SOURCE,'decks':music.decks() if hasattr(music,'decks') else None}
 @app.get('/api/music/events')
 async def music_events(request:Request):
     async def events():
@@ -152,6 +162,12 @@ async def music_events(request:Request):
                 yield 'data: '+json.dumps(payload)+'\n\n'
         finally:music_subscribers.discard(queue)
     return StreamingResponse(events(),media_type='text/event-stream',headers={'Cache-Control':'no-cache','X-Accel-Buffering':'no'})
+
+@app.get('/api/decks/{number}/artwork')
+async def deck_artwork(number:int):
+    data=await music.deck_artwork(number) if hasattr(music,'deck_artwork') else None
+    if data is None: raise HTTPException(404,'No artwork for this deck')
+    return Response(data,media_type='image/png' if data.startswith(b'\x89PNG') else 'image/jpeg',headers={'Cache-Control':'private, max-age=3600'})
 
 @app.get('/api/artwork')
 async def get_artwork():
@@ -198,7 +214,7 @@ async def settings(body:Settings):
     if hasattr(audio,'set_frequency_thresholds'):
         audio.set_frequency_thresholds(body.bass_threshold_db,body.bass_fallback_db,body.mids_threshold_db)
     if old_mode!=body.mode or old_settings.flash_trigger!=body.flash_trigger or any(getattr(old_settings,key)!=getattr(body,key) for key in ('bass_threshold_db','bass_fallback_db','mids_threshold_db','flash_sensitivity','roll_max_hz','drum_isolation')):
-        engine.hit_flashes.reset(getattr(audio,'hit_counter',0))
+        engine.hit_flashes.reset(getattr(audio,'hit_counter',0));engine.beat_lock.reset(getattr(audio,'hit_counter',0))
     if old_settings.palette_size!=body.palette_size:
         await resize_palette(body.palette_size)
     if engine.status == 'running':
@@ -323,7 +339,7 @@ async def pair(body:Pair):
     return {'ok':True,'message':'Paired; configure bulb roles before starting'}
 @app.get('/api/music')
 async def current_music():
-    if not config.MUSIC_ENABLED: return {'available':False,'reason':'Enable APPLE_MUSIC_ENABLED in .env to use Music scripting'}
+    if not config.MUSIC_ENABLED: return {'available':False,'reason':'Enable APPLE_MUSIC_ENABLED or REKORDBOX_ENABLED in .env to follow tracks'}
     return await music.current_track()
 @app.get('/')
 async def index(): return FileResponse(STATIC/'index.html')

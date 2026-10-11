@@ -47,12 +47,13 @@ class HitFlashes:
             if trigger=='bass_drums' and hit['kind'] not in ('bass','drum'):continue
             if trigger=='frequency' and hit['kind'] not in ('frequency_bass','frequency_mids'):continue
             if trigger=='bands' and hit['kind']!='band':continue
-            qualified = trigger in ('percussion','bands') and hit.get('qualified',False)
+            if trigger=='rolls' and not (hit['kind']=='percussion' and hit.get('roll')):continue
+            qualified = trigger in ('percussion','bands','rolls') and hit.get('qualified',False)
             if (trigger!='frequency' and not qualified and hit['strength'] < threshold) or hit['at']-self.last_attack < .045: continue
             self.last_attack = hit['at']
             self.qualifying_hits += 1
             if (self.qualifying_hits-1) % division: continue
-            rolling = trigger in ('percussion','bands') and hit.get('roll',False)
+            rolling = trigger in ('percussion','bands','rolls') and hit.get('roll',False)
             rate = min(8,max(3,roll_max_hz)) if rolling else 3
             gap = 1/rate if mode=='beat_flash' else .08
             # Quantized 10 ms onset timestamps can differ slightly from a roll's
@@ -77,6 +78,99 @@ class HitFlashes:
             return [low+(1-low)*(.5+.5*math.cos(math.pi*(now-self.active[i][0])/self.active[i][1]))
                     if i in self.active and 0<=now-self.active[i][0]<self.active[i][1] else low for i in range(count)]
         return [1 if self.last_flash <= now < self.until and (pattern=='together' or i==self.index) else low for i in range(count)]
+
+
+class BeatLock:
+    """Tempo clock phase-locked to drum hits, for steady pulses that land on the drums.
+
+    The tempo detector supplies the beat period, so pulses never stop for missed
+    hits, fills or breakdowns. Kicks (and, more weakly, snares/claps) near a
+    predicted beat pull the clock's phase onto them a little at a time, with a
+    small bounded tempo trim, so the clock converges without visible jumps.
+    Hi-hats and off-beat hits are ignored. If several consistent kicks keep
+    landing away from the clock (for example half a beat off), it re-aligns to
+    them at once. While drums lock it, the clock learns the detector's usual
+    offset from them; without drums for a while it eases back to the detector's
+    phase corrected by that offset, so returning drums are still on the clock.
+    """
+    WINDOW = .2          # hits within ±20% of a period from a beat steer the clock
+    KICK_GAIN, SNARE_GAIN = .35, .15
+    TRIM_GAIN, TRIM_LIMIT, TRIM_WINDOW = .02, .03, .06
+    REALIGN_HITS, REALIGN_SPREAD = 4, .08
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self, cursor=0):
+        self.cursor = cursor; self.anchor = None; self.base = None; self.period = None
+        self.trim = 0.; self.last_lock = -math.inf; self.updated = None; self.strays = []; self.bias = 0.
+
+    def _error(self, at):
+        beats = round((at-self.anchor)/self.period)
+        return at-(self.anchor+beats*self.period)
+
+    def _retime(self, at):
+        """Apply base tempo and trim, keeping the beat nearest at where it is.
+
+        The anchor beat can be minutes old; without this, a 0.05% trim change would
+        move the current beat by tens of milliseconds.
+        """
+        period = self.base*(1+self.trim)
+        if self.period:self.anchor += round((at-self.anchor)/self.period)*(self.period-period)
+        self.period = period
+
+    def _detector_error(self, now, phase_at):
+        # Compare at the detector's beat nearest now, so tempo trim is not magnified
+        # by extrapolating far into the past.
+        return self._error(phase_at+round((now-phase_at)/self.base)*self.base)
+
+    def update(self, hits, now, bpm, phase_at):
+        """Consume new hits; return (bpm, beat time) of the locked clock, or (None, None)."""
+        if not bpm or phase_at is None:
+            self.anchor = None
+            for hit in hits:
+                if hit['at'] <= now:self.cursor = max(self.cursor, hit['id'])
+            return None, None
+        base = 60/bpm
+        if self.anchor is None or abs(base-self.base) > self.base*.04:
+            # New, doubled or halved tempo (or a new song): start from the detector's phase.
+            self.anchor = phase_at; self.base = base; self.trim = 0.; self.strays = []; self.last_lock = now; self.bias = 0.
+            self.period = None
+        self.base = base; self._retime(now)
+        for hit in hits:
+            if hit['id'] <= self.cursor:continue
+            if hit['at'] > now:break
+            self.cursor = hit['id']
+            family = hit.get('family')
+            if hit.get('kind') != 'percussion' or family not in ('kick', 'snare'):continue
+            error = self._error(hit['at'])
+            if abs(error) <= self.period*self.WINDOW:
+                gain = self.KICK_GAIN if family == 'kick' else self.SNARE_GAIN
+                self.anchor += gain*error
+                if abs(error) <= self.period*self.TRIM_WINDOW:
+                    # Learn a tempo trim only once locked, so the first pull-in does not wind it up.
+                    self.trim = max(-self.TRIM_LIMIT, min(self.TRIM_LIMIT, self.trim+self.TRIM_GAIN*error/self.period))
+                self._retime(hit['at'])
+                self.last_lock = hit['at']
+                if family == 'kick':self.strays = []
+            elif family == 'kick':
+                self.strays = (self.strays+[(hit['at'], error)])[-self.REALIGN_HITS:]
+                errors = [e for _, e in self.strays]
+                if len(errors) == self.REALIGN_HITS and max(errors)-min(errors) <= self.period*self.REALIGN_SPREAD:
+                    # The kicks agree with each other, not with the clock: move onto them.
+                    self.anchor += sum(errors)/len(errors); self.strays = []; self.last_lock = hit['at']
+        if self.updated is not None:
+            elapsed = now-self.updated
+            if now-self.last_lock > 8*self.period:
+                # A breakdown without drums: ease back to the detector (less its learned
+                # offset from the drums) over a few seconds.
+                step = min(1., elapsed/3)
+                self.anchor += step*(self._detector_error(now, phase_at)-self.bias); self.trim *= 1-step
+                self._retime(now)
+            else:
+                self.bias += min(1., elapsed/2)*(self._detector_error(now, phase_at)-self.bias)
+        self.updated = now
+        return 60/self.period, self.anchor
 
 
 def clock_gentle_factors(bpm, now, phase_at, count, pattern, division=1, low=.2):

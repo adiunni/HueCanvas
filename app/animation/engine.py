@@ -8,7 +8,7 @@ from app.hue.entertainment import EntertainmentSession, STREAM_MODES
 from app.palette.convert import hex_to_xy
 from app.palette.gamut import map_gamut
 from app.animation.modes import frame
-from app.animation.beats import clock_gentle_factors, clock_flash_factors, HitFlashes, palette_color
+from app.animation.beats import BeatLock, clock_gentle_factors, clock_flash_factors, HitFlashes, palette_color
 from app.animation.music_brightness import grouped_beat_factor, grouped_beat_factors, energy_factor
 
 class Engine:
@@ -18,7 +18,7 @@ class Engine:
         self.status='stopped'; self.error=None; self.snapshot=None; self.saved_settings={}
         self.lock=asyncio.Lock(); self.lifecycle_lock=asyncio.Lock(); self.started=time.monotonic()
         self.stream=None; self.stream_factory=EntertainmentSession; self.audio=None
-        self.hit_flashes=HitFlashes()
+        self.hit_flashes=HitFlashes();self.beat_lock=BeatLock()
         self.wake=asyncio.Event()
         self.white_task=None; self.rest_brightness={}; self.rest_error=None
         self.rest_lock=asyncio.Lock()
@@ -30,9 +30,9 @@ class Engine:
         return self.settings.mode in STREAM_MODES and self.settings.flash_trigger!='bpm'
 
     def pulse_trigger(self):
-        """The trigger in effect: the BPM clock follows drum hits until a tempo locks."""
+        """The trigger in effect: the BPM clock (alone or locked to drums) follows drum hits until a tempo locks."""
         trigger=self.settings.flash_trigger
-        if trigger=='bpm' and self.settings.bpm_source=='audio' and self.follows_audio() and self.beat_clock()[0] is None:
+        if trigger in ('bpm','beat_drums') and self.settings.bpm_source=='audio' and self.follows_audio() and self.beat_clock()[0] is None:
             return 'percussion'
         return trigger
 
@@ -163,11 +163,15 @@ class Engine:
                 now=time.monotonic(); low=self.settings.flash_low/100
                 self.collect_drops(now)
                 offset_seconds=self.settings.timing_offset_ms/1000
+                trigger=self.pulse_trigger();listening=bool(self.audio and self.audio.running)
+                if trigger=='beat_drums':
+                    # The tempo clock, pulled onto the actual kicks and snares.
+                    bpm,phase_at=self.beat_lock.update(self.audio.recent_hits(self.beat_lock.cursor) if listening else [],now,bpm,phase_at)
                 if phase_at is not None:phase_at+=offset_seconds
                 colors=sorted((light for light in self.lights if light.enabled and light.color),
                               key=lambda light:({'COLOR_LEFT':0,'COLOR_RIGHT':1}.get(light.role,2),light.id))
-                factors=[1]*len(colors);trigger=self.pulse_trigger()
-                if trigger!='bpm':
+                factors=[1]*len(colors)
+                if trigger not in ('bpm','beat_drums'):
                     if self.audio and self.audio.running:
                         factors=self.hit_flashes.factors(self.audio.recent_hits(self.hit_flashes.cursor),now,len(colors),
                             trigger,self.settings.flash_pattern,self.settings.flash_sensitivity,self.settings.beat_every,low,
@@ -177,6 +181,12 @@ class Engine:
                         factors=clock_flash_factors(bpm,now,phase_at,len(colors),self.settings.flash_pattern,self.settings.beat_every,low,accent=now<self.drop_until)
                     else:
                         factors=clock_gentle_factors(bpm,now,phase_at,len(colors),self.settings.flash_pattern,self.settings.beat_every,low)
+                    if trigger=='beat_drums' and listening:
+                        # Snare rolls add their faster hits on top of the steady beat.
+                        rolls=self.hit_flashes.factors(self.audio.recent_hits(self.hit_flashes.cursor),now,len(colors),
+                            'rolls',self.settings.flash_pattern,self.settings.flash_sensitivity,1,low,
+                            mode=self.settings.mode,offset=offset_seconds,period=60/bpm,accent=now<self.drop_until,roll_max_hz=self.settings.roll_max_hz)
+                        factors=[max(a,b) for a,b in zip(factors,rolls)]
                 if self.settings.mode=='beat_gentle' and now<self.drop_until:
                     factors=[low+(1-low)*math.sqrt(max(0,(factor-low)/(1-low))) for factor in factors]
                 values={}
@@ -255,7 +265,7 @@ class Engine:
                 stream=self.stream_factory(self.client)
                 await stream.start(self.lights)
                 self.stream=stream
-            self.hit_flashes.reset(getattr(self.audio,'hit_counter',0))
+            self.hit_flashes.reset(getattr(self.audio,'hit_counter',0));self.beat_lock.reset(getattr(self.audio,'hit_counter',0))
             self.drop_cursor=getattr(self.audio,'drop_counter',0);self.palette_shift=0;self.drop_until=0
             await self.apply()
         except Exception as exc:

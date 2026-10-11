@@ -228,9 +228,14 @@ class LiveBPM:
                 # stream that appears active but never provides another frame.
                 self.callback_error='Audio processing failed: '+str(exc)+'. Restart listening.'
                 self.error=self.callback_error
+        channels=min(2, device['channels'])
+        def raw_capture(data, frames, timing, status):
+            # RawInputStream plus reshape avoids sounddevice's ndarray wrapper,
+            # which assigns .shape (deprecated since NumPy 2.5).
+            capture(np.frombuffer(data, dtype=np.float32).reshape(-1, channels), frames, timing, status)
         def open_stream():
-            stream = sd.InputStream(device=device_id, samplerate=self.sample_rate,
-                                    channels=min(2, device['channels']), dtype='float32', latency='low', blocksize=0, callback=capture)
+            stream = sd.RawInputStream(device=device_id, samplerate=self.sample_rate,
+                                       channels=channels, dtype='float32', latency='low', blocksize=0, callback=raw_capture)
             try: stream.start()
             except Exception:
                 stream.close(); raise

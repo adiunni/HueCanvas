@@ -27,7 +27,7 @@ def test_live_capture_opens_on_main_thread_and_releases_memory(monkeypatch):
         def close(self):
             assert threading.get_ident() == main_thread
             self.closed = True
-    monkeypatch.setattr(live, 'sd', type('SD', (), {'InputStream': Stream}))
+    monkeypatch.setattr(live, 'sd', type('SD', (), {'RawInputStream': Stream}))
     monkeypatch.setattr(live, 'input_devices', lambda: [{'id':1,'name':'BlackHole 2ch','sample_rate':48000,'channels':2}])
     async def scenario():
         audio = live.LiveBPM()

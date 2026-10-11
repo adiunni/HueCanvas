@@ -15,7 +15,7 @@ def fake_input(monkeypatch,data=None,start_error=False):
             if start_error:raise RuntimeError('device unavailable')
             if data is not None:self.callback(data,len(data),None,None)
         def close(self):self.closed=True
-    monkeypatch.setattr(live,'sd',type('SD',(),{'InputStream':Stream}))
+    monkeypatch.setattr(live,'sd',type('SD',(),{'RawInputStream':Stream}))
     monkeypatch.setattr(live,'input_devices',lambda:[{'id':1,'name':'BlackHole 2ch','sample_rate':12000,'channels':2}])
 
 
