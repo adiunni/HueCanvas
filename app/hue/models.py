@@ -1,5 +1,5 @@
 from typing import Literal
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 Role = Literal['COLOR_LEFT', 'COLOR_RIGHT', 'WHITE_LEFT', 'WHITE_RIGHT']
 class Light(BaseModel):
     id: str
@@ -30,7 +30,21 @@ class Settings(BaseModel):
     bpm_source: Literal['manual', 'audio'] = 'manual'
     flash_low: float = Field(default=20, ge=0, le=80)
     beat_every: Literal[1, 2, 4] = 1
-    flash_trigger: Literal['bpm', 'bass', 'bass_drums'] = 'bpm'
+    flash_trigger: Literal['bpm', 'percussion', 'frequency', 'bass', 'bass_drums'] = 'bpm'
     flash_pattern: Literal['together', 'staggered'] = 'together'
+    roll_max_hz: float = Field(default=8, ge=3, le=8)
     flash_sensitivity: float = Field(default=50, ge=1, le=100)
     white_response: Literal['music', 'steady'] = 'music'
+    pulse_palette: Literal['cycle', 'fixed'] = 'cycle'
+    palette_every: Literal[1, 2, 4, 8] = 4
+    timing_offset_ms: float = Field(default=0, ge=0, le=250)
+    drop_response: Literal['accent', 'off'] = 'accent'
+    bass_threshold_db: float = Field(default=-15, ge=-90, le=0)
+    bass_fallback_db: float = Field(default=-70, ge=-90, le=0)
+    mids_threshold_db: float = Field(default=-20, ge=-90, le=0)
+
+    @model_validator(mode='after')
+    def ordered_frequency_thresholds(self):
+        if self.bass_fallback_db >= self.bass_threshold_db:
+            raise ValueError('Bass fallback must be below the bass trigger threshold')
+        return self

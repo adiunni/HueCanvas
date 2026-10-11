@@ -8,8 +8,8 @@ from app.hue.entertainment import EntertainmentSession, STREAM_MODES
 from app.palette.convert import hex_to_xy
 from app.palette.gamut import map_gamut
 from app.animation.modes import frame
-from app.animation.beats import pulse_factor, clock_flash_factors, HitFlashes
-from app.animation.music_brightness import grouped_beat_factor, energy_factor
+from app.animation.beats import clock_gentle_factors, clock_flash_factors, HitFlashes, palette_color
+from app.animation.music_brightness import grouped_beat_factor, grouped_beat_factors, energy_factor
 
 class Engine:
     def __init__(self, client):
@@ -24,9 +24,10 @@ class Engine:
         self.rest_lock=asyncio.Lock()
         self.silence_since=None;self.sound_since=None;self.audio_checked_at=-float('inf')
         self.waiting_restored=True;self.playback_message=None
+        self.drop_cursor=0;self.palette_shift=0;self.drop_until=0
 
     def uses_audio_hits(self):
-        return self.settings.mode=='beat_flash' and self.settings.flash_trigger!='bpm'
+        return self.settings.mode in STREAM_MODES and self.settings.flash_trigger!='bpm'
 
     def follows_audio(self):
         return bool(self.audio and self.audio.running and hasattr(self.audio,'music_energy'))
@@ -95,13 +96,28 @@ class Engine:
         energy=self.audio.music_energy() if self.audio and hasattr(self.audio,'music_energy') else None
         return energy_factor(energy,low) if energy is not None else 1
 
+    def collect_drops(self,now):
+        if not self.audio or not hasattr(self.audio,'recent_drops'):return
+        for drop in self.audio.recent_drops(self.drop_cursor):
+            self.drop_cursor=drop['id']
+            if self.settings.drop_response=='accent' and 0<=now-drop['at']<1:
+                self.palette_shift+=1;self.drop_until=now+.6
+
     async def rest_music(self, lights, *, steady=False, force=False):
         async with self.rest_lock:
             now=time.monotonic();factor=1 if steady else self.music_factor(now)
+            whites=sorted((l for l in lights if not l.color and l.enabled),
+                key=lambda l:({'WHITE_LEFT':0,'WHITE_RIGHT':1}.get(l.role,2),l.id))
+            white_factors={}
+            bpm,phase_at=self.beat_clock()
+            if self.uses_audio_hits() and self.follows_audio():
+                bpm=self.audio.current_bpm();phase_at=self.audio.phase_at
+            if not steady and bpm and phase_at is not None and self.settings.flash_pattern=='staggered':
+                white_factors=dict(zip((l.id for l in whites),grouped_beat_factors(bpm,phase_at,now,len(whites),'staggered',self.settings.flash_low/100)))
             for light in lights:
                 if not light.enabled or not light.dimming: continue
                 peak=self.settings.brightness if light.color else self.settings.white_fill
-                brightness=max(1,round(peak*factor,1))
+                brightness=max(1,round(peak*white_factors.get(light.id,factor),1))
                 previous=self.rest_brightness.get(light.id)
                 if previous and not force:
                     if now-previous[1]<2 or abs(brightness-previous[0])<1: continue
@@ -131,24 +147,33 @@ class Engine:
                 if self.stream is None: raise ValueError('Click Start to initialize Hue Entertainment for beat effects')
                 bpm,phase_at=self.beat_clock()
                 now=time.monotonic(); low=self.settings.flash_low/100
+                self.collect_drops(now)
+                offset_seconds=self.settings.timing_offset_ms/1000
+                if phase_at is not None:phase_at+=offset_seconds
                 colors=sorted((light for light in self.lights if light.enabled and light.color),
                               key=lambda light:({'COLOR_LEFT':0,'COLOR_RIGHT':1}.get(light.role,2),light.id))
                 factors=[1]*len(colors)
                 if self.uses_audio_hits():
                     if self.audio and self.audio.running:
                         factors=self.hit_flashes.factors(self.audio.recent_hits(self.hit_flashes.cursor),now,len(colors),
-                            self.settings.flash_trigger,self.settings.flash_pattern,self.settings.flash_sensitivity,self.settings.beat_every,low)
+                            self.settings.flash_trigger,self.settings.flash_pattern,self.settings.flash_sensitivity,self.settings.beat_every,low,
+                            mode=self.settings.mode,offset=offset_seconds,period=60/(bpm or 120),accent=now<self.drop_until,roll_max_hz=self.settings.roll_max_hz)
                 elif bpm and phase_at is not None:
                     if self.settings.mode=='beat_flash':
-                        factors=clock_flash_factors(bpm,now,phase_at,len(colors),self.settings.flash_pattern,self.settings.beat_every,low)
+                        factors=clock_flash_factors(bpm,now,phase_at,len(colors),self.settings.flash_pattern,self.settings.beat_every,low,accent=now<self.drop_until)
                     else:
-                        factors=[pulse_factor(self.settings.mode,bpm,now,phase_at,self.settings.beat_every,low)]*len(colors)
+                        factors=clock_gentle_factors(bpm,now,phase_at,len(colors),self.settings.flash_pattern,self.settings.beat_every,low)
+                if self.settings.mode=='beat_gentle' and now<self.drop_until:
+                    factors=[low+(1-low)*math.sqrt(max(0,(factor-low)/(1-low))) for factor in factors]
                 values={}
                 if self.status=='starting':
                     await self.rest_music([light for light in self.lights if not light.color],steady=self.settings.white_response=='steady',force=True)
                 for light,factor in zip(colors,factors):
                     offset=1 if light.role=='COLOR_RIGHT' else 0
                     color=self.palette[offset%len(self.palette)]
+                    if self.settings.pulse_palette=='cycle':
+                        position=(now-self.started)/(self.settings.palette_every*60/bpm) if bpm else (now-self.started)/self.settings.speed
+                        color=palette_color(self.palette,position+self.palette_shift,offset)
                     xy=map_gamut(hex_to_xy(color),light.gamut)
                     brightness=self.settings.brightness*factor
                     values[light.id]=(*xy,brightness/100)
@@ -199,7 +224,7 @@ class Engine:
             if self.settings.mode=='music_brightness' and not any(light.enabled and light.dimming for light in self.lights):
                 raise ValueError('Enable at least one dimmable bulb for music brightness.')
             if self.uses_audio_hits() and not (self.audio and self.audio.running):
-                raise ValueError('Start listening to BlackHole before using bass or drum-triggered flashes. A BPM estimate is not required.')
+                raise ValueError('Start listening to BlackHole before using audio-triggered pulses or flashes. A BPM estimate is not required.')
             silent=self.follows_audio() and (self.audio.music_energy() or 0)<.00005
             if not silent and self.settings.mode in STREAM_MODES and not self.uses_audio_hits() and self.beat_clock()[0] is None:
                 raise ValueError('Start audio detection and wait for a reliable BPM, or choose Manual BPM before starting beat effects.')
@@ -217,6 +242,7 @@ class Engine:
                 await stream.start(self.lights)
                 self.stream=stream
             self.hit_flashes.reset(getattr(self.audio,'hit_counter',0))
+            self.drop_cursor=getattr(self.audio,'drop_counter',0);self.palette_shift=0;self.drop_until=0
             await self.apply()
         except Exception as exc:
             self.status='stopped';self.error=str(exc)

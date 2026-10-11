@@ -21,4 +21,4 @@ if ! .venv/bin/python -c 'import uvicorn; from importlib.metadata import version
 fi
 
 printf '%s\n' "Starting HueCanvas at http://127.0.0.1:${PORT:-8000}" 'Press Ctrl+C to stop.'
-exec .venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port "${PORT:-8000}" "$@"
+exec .venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port "${PORT:-8000}" --timeout-graceful-shutdown 5 "$@"

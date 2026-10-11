@@ -7,7 +7,7 @@ import re
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from fastapi import FastAPI, HTTPException, UploadFile, File, Query, Request
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
@@ -19,6 +19,7 @@ from app.hue.models import LightSettings, Settings
 from app.animation.engine import Engine
 from app.palette.extract import extract_palette
 from app.music.apple_music import AppleMusic
+from app.music.sync import ArtworkSync
 from app.audio.live import LiveBPM, input_devices
 from app.audio.routing import routing_status, set_music_output
 from app.hue.entertainment import STREAM_MODES
@@ -26,9 +27,11 @@ from app.hue.entertainment import STREAM_MODES
 STATIC = Path(__file__).parent/'static'
 engine = None
 artwork = None
-palette_cache = {}
+music_track = None
+music_error = None
+music_revision = 0
+music_subscribers = set()
 music = AppleMusic()
-last_album = None
 audio = LiveBPM()
 
 def real_client(ip=None, bridge_id=None):
@@ -51,29 +54,36 @@ def save_settings():
     config.DATA_DIR.mkdir(mode=0o700,exist_ok=True)
     (config.DATA_DIR/'lights.json').write_text(json.dumps({l.id:{'name':l.name,'role':l.role,'enabled':l.enabled} for l in engine.lights}))
 
+def artwork_url():
+    return '/api/artwork?v='+hashlib.sha256(artwork).hexdigest()[:16] if artwork else None
+
+
+def music_payload():
+    return {'revision':music_revision,'track':music_track,'artwork':artwork_url(),
+            'palette':engine.palette if engine else None,'error':music_error}
+
+
+async def music_update(kind,value):
+    global music_track,music_error,music_revision,artwork
+    if kind=='track':
+        music_track=value;artwork=None;music_error=None
+        if audio.running and hasattr(audio,'track_changed'):audio.track_changed()
+    elif kind=='artwork':artwork=value;music_error=None
+    elif kind=='palette':engine.palette=value;music_error=None
+    elif kind=='error':music_error='Music artwork unavailable; upload manually. '+value
+    music_revision+=1
+    payload=music_payload()
+    for queue in tuple(music_subscribers):
+        if queue.full():queue.get_nowait()
+        queue.put_nowait(payload)
+    if kind=='palette' and engine.status=='running':
+        try:await engine.apply(only_if_running=True)
+        except Exception as exc:engine.error=str(exc)
+
+
 async def music_sync():
-    global last_album, artwork
-    while True:
-        await asyncio.sleep(10)
-        try:
-            track = await music.current_track()
-            if not track.get('available'): continue
-            album = (track['artist'],track['album'])
-            if album == last_album: continue
-            key = hashlib.sha256(repr(album).encode()).hexdigest()
-            path = config.DATA_DIR/f'{key}.art'
-            config.DATA_DIR.mkdir(mode=0o700,exist_ok=True)
-            if key not in palette_cache:
-                await music.artwork(path)
-                data = path.read_bytes()
-                if len(data)>10*1024*1024: raise ValueError('Artwork too large')
-                palette_cache[key] = await run_in_threadpool(extract_palette,data,4)
-            engine.palette = palette_cache[key]
-            if path.exists(): artwork = path.read_bytes()
-            if engine.status == 'running': await engine.apply(only_if_running=True)
-            last_album = album
-        except Exception as exc:
-            engine.error = 'Music artwork unavailable; upload manually. ' + str(exc)
+    sync=ArtworkSync(music,config.DATA_DIR,music_update)
+    await sync.run()
 
 @asynccontextmanager
 async def lifespan(app):
@@ -120,7 +130,22 @@ async def value_error(request, exc):
     return JSONResponse({'detail':str(exc)},status_code=400)
 @app.get('/api/state')
 async def state():
-    return {'mock':config.MOCK_MODE,'bridge':{'ip':os.getenv('HUE_BRIDGE_IP',''),'id':getattr(engine.client,'bridge_id',''),'verify_tls':getattr(engine.client,'verify_tls',False)} if not config.MOCK_MODE else None,'lights':[l.model_dump() for l in engine.lights], 'settings':engine.settings.model_dump(),'palette':engine.palette,'status':engine.status,'playback_message':engine.playback_message,'error':engine.error or engine.rest_error,'artwork':('/api/artwork?v='+hashlib.sha256(artwork).hexdigest()[:16]) if artwork else None,'entertainment':True,'streaming':engine.stream is not None,'streaming_key_configured':config.MOCK_MODE or bool(getattr(engine.client,'client_key','')),'audio':audio.status(),'music_enabled':config.MUSIC_ENABLED}
+    return {'mock':config.MOCK_MODE,'bridge':{'ip':os.getenv('HUE_BRIDGE_IP',''),'id':getattr(engine.client,'bridge_id',''),'verify_tls':getattr(engine.client,'verify_tls',False)} if not config.MOCK_MODE else None,'lights':[l.model_dump() for l in engine.lights], 'settings':engine.settings.model_dump(),'palette':engine.palette,'status':engine.status,'playback_message':engine.playback_message,'error':engine.error or engine.rest_error,'artwork':artwork_url(),'music_track':music_track,'music_error':music_error,'music_revision':music_revision,'entertainment':True,'streaming':engine.stream is not None,'streaming_key_configured':config.MOCK_MODE or bool(getattr(engine.client,'client_key','')),'audio':audio.status(),'music_enabled':config.MUSIC_ENABLED}
+@app.get('/api/music/events')
+async def music_events(request:Request):
+    async def events():
+        queue=asyncio.Queue(maxsize=1);music_subscribers.add(queue)
+        try:
+            yield 'data: '+json.dumps(music_payload())+'\n\n'
+            while not await request.is_disconnected():
+                try:payload=await asyncio.wait_for(queue.get(),timeout=15)
+                except asyncio.TimeoutError:
+                    yield ': heartbeat\n\n'
+                    continue
+                yield 'data: '+json.dumps(payload)+'\n\n'
+        finally:music_subscribers.discard(queue)
+    return StreamingResponse(events(),media_type='text/event-stream',headers={'Cache-Control':'no-cache','X-Accel-Buffering':'no'})
+
 @app.get('/api/artwork')
 async def get_artwork():
     if artwork is None: raise HTTPException(404,'No artwork uploaded')
@@ -147,8 +172,14 @@ async def palette(body:Palette):
     return {'ok':True}
 @app.put('/api/settings')
 async def settings(body:Settings):
-    old_mode = engine.settings.mode
+    old_settings = engine.settings
+    old_mode = old_settings.mode
     engine.settings = body
+    if hasattr(audio,'percussion_sensitivity'): audio.percussion_sensitivity=body.flash_sensitivity
+    if hasattr(audio,'set_frequency_thresholds'):
+        audio.set_frequency_thresholds(body.bass_threshold_db,body.bass_fallback_db,body.mids_threshold_db)
+    if old_mode!=body.mode or old_settings.flash_trigger!=body.flash_trigger or any(getattr(old_settings,key)!=getattr(body,key) for key in ('bass_threshold_db','bass_fallback_db','mids_threshold_db','flash_sensitivity','roll_max_hz')):
+        engine.hit_flashes.reset(getattr(audio,'hit_counter',0))
     if engine.status == 'running':
         if (old_mode in STREAM_MODES) != (body.mode in STREAM_MODES) or (old_mode=='music_brightness') != (body.mode=='music_brightness'):
             await engine.start()
@@ -184,6 +215,9 @@ async def control(action:str):
 @app.get('/api/audio/devices')
 async def audio_devices():
     return {'devices':await run_in_threadpool(input_devices)}
+@app.get('/api/audio/spectrum')
+async def audio_spectrum():
+    return await run_in_threadpool(audio.spectrum)
 @app.get('/api/audio/routing')
 async def audio_routing():
     return await run_in_threadpool(routing_status)
@@ -198,6 +232,9 @@ class AudioInput(BaseModel):
 async def start_audio(body:AudioInput):
     if engine.status in ('running','waiting_audio') and (engine.settings.bpm_source=='audio' or engine.uses_audio_hits() or engine.white_music_active()):
         await engine.pause()
+    if hasattr(audio,'set_frequency_thresholds'):
+        audio.set_frequency_thresholds(engine.settings.bass_threshold_db,engine.settings.bass_fallback_db,engine.settings.mids_threshold_db)
+    if hasattr(audio,'percussion_sensitivity'): audio.percussion_sensitivity=engine.settings.flash_sensitivity
     await audio.start(body.device_id)
     return audio.status()
 @app.post('/api/audio/stop')
