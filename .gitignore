@@ -1,0 +1,8 @@
+.venv/
+.env
+__pycache__/
+.pytest_cache/
+*.egg-info/
+.huecanvas/
+hue.pem
+hue.txt

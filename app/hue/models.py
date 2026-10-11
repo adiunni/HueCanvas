@@ -1,0 +1,36 @@
+from typing import Literal
+from pydantic import BaseModel, Field
+Role = Literal['COLOR_LEFT', 'COLOR_RIGHT', 'WHITE_LEFT', 'WHITE_RIGHT']
+class Light(BaseModel):
+    id: str
+    name: str
+    owner: str | None = None
+    color: bool = False
+    dimming: bool = False
+    temperature: bool = False
+    gamut: list[list[float]] | None = None
+    enabled: bool = False
+    role: Role | None = None
+    on: bool = False
+    brightness: float = 50
+    xy: list[float] | None = None
+    preview_color: str | None = None
+class LightSettings(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    enabled: bool
+    role: Role | None = None
+class Settings(BaseModel):
+    mode: Literal['static', 'crossfade', 'rotate', 'breathe', 'bpm', 'beat_gentle', 'beat_flash', 'music_brightness'] = 'static'
+    brightness: float = Field(default=60, ge=1, le=100)
+    white_fill: float = Field(default=25, ge=1, le=100)
+    transition: float = Field(default=3, ge=1, le=30)
+    speed: float = Field(default=15, ge=4, le=120)
+    bpm: float = Field(default=100, ge=30, le=240)
+
+    bpm_source: Literal['manual', 'audio'] = 'manual'
+    flash_low: float = Field(default=20, ge=0, le=80)
+    beat_every: Literal[1, 2, 4] = 1
+    flash_trigger: Literal['bpm', 'bass', 'bass_drums'] = 'bpm'
+    flash_pattern: Literal['together', 'staggered'] = 'together'
+    flash_sensitivity: float = Field(default=50, ge=1, le=100)
+    white_response: Literal['music', 'steady'] = 'music'
