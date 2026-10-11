@@ -43,7 +43,7 @@ class LiveBPM:
             last_hit = dict(self.hits[-1]) if self.hits else None
             hit_count = len(self.hits)
             age=time.monotonic()-self.end_time if self.frames else None
-        capture_state='idle'
+        capture_state='error' if self.error and not self.running else 'idle'
         if self.running:
             if self.callback_error:capture_state='processing_error'
             elif age is None or age>2:capture_state='waiting_input' if time.monotonic()-self.started_at<2 else 'stalled'
@@ -129,7 +129,9 @@ class LiveBPM:
         try:
             self.stream = open_stream()
         except Exception as exc:
-            raise ValueError('Cannot open audio input. Allow microphone/audio access for the app launching HueCanvas.') from exc
+            await self._stop()
+            self.error='Cannot open audio input. Allow microphone/audio access for the app launching HueCanvas, then restart listening.'
+            raise ValueError(self.error) from exc
         self.running = True
         self.task = asyncio.create_task(self._monitor())
 

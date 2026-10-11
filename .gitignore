@@ -1,8 +1,51 @@
-.venv/
+# Local credentials and environment files (keep safe example templates)
 .env
-__pycache__/
-.pytest_cache/
-*.egg-info/
-.huecanvas/
-hue.pem
+.env.*
+!.env.example
+!.env.*.example
+.envrc
+.envrc.*
 hue.txt
+hue.txt.*
+hue.pem
+*.pem
+*.pem.*
+*.key
+*.key.*
+*.p12
+*.pfx
+credentials.json
+credentials.json.*
+
+# Runtime credentials, bulb preferences, and cached album artwork
+.huecanvas/
+
+# Python environments, caches, and build output
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+*.egg-info/
+build/
+dist/
+
+# Logs, editor state, and local backups
+*.log
+*.bak
+*.orig
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+.DS_Store
+.AppleDouble/
+
+# Local agent instructions
+AGENTS.md

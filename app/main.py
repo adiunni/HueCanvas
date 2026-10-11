@@ -70,7 +70,7 @@ async def music_sync():
                 palette_cache[key] = await run_in_threadpool(extract_palette,data,4)
             engine.palette = palette_cache[key]
             if path.exists(): artwork = path.read_bytes()
-            if engine.status == 'running': await engine.apply()
+            if engine.status == 'running': await engine.apply(only_if_running=True)
             last_album = album
         except Exception as exc:
             engine.error = 'Music artwork unavailable; upload manually. ' + str(exc)
@@ -120,7 +120,7 @@ async def value_error(request, exc):
     return JSONResponse({'detail':str(exc)},status_code=400)
 @app.get('/api/state')
 async def state():
-    return {'mock':config.MOCK_MODE,'bridge':{'ip':os.getenv('HUE_BRIDGE_IP',''),'id':getattr(engine.client,'bridge_id',''),'verify_tls':getattr(engine.client,'verify_tls',False)} if not config.MOCK_MODE else None,'lights':[l.model_dump() for l in engine.lights], 'settings':engine.settings.model_dump(),'palette':engine.palette,'status':engine.status,'error':engine.error or engine.rest_error,'artwork':('/api/artwork?v='+hashlib.sha256(artwork).hexdigest()[:16]) if artwork else None,'entertainment':True,'streaming':engine.stream is not None,'streaming_key_configured':config.MOCK_MODE or bool(getattr(engine.client,'client_key','')),'audio':audio.status(),'music_enabled':config.MUSIC_ENABLED}
+    return {'mock':config.MOCK_MODE,'bridge':{'ip':os.getenv('HUE_BRIDGE_IP',''),'id':getattr(engine.client,'bridge_id',''),'verify_tls':getattr(engine.client,'verify_tls',False)} if not config.MOCK_MODE else None,'lights':[l.model_dump() for l in engine.lights], 'settings':engine.settings.model_dump(),'palette':engine.palette,'status':engine.status,'playback_message':engine.playback_message,'error':engine.error or engine.rest_error,'artwork':('/api/artwork?v='+hashlib.sha256(artwork).hexdigest()[:16]) if artwork else None,'entertainment':True,'streaming':engine.stream is not None,'streaming_key_configured':config.MOCK_MODE or bool(getattr(engine.client,'client_key','')),'audio':audio.status(),'music_enabled':config.MUSIC_ENABLED}
 @app.get('/api/artwork')
 async def get_artwork():
     if artwork is None: raise HTTPException(404,'No artwork uploaded')
@@ -135,7 +135,7 @@ async def upload(file: UploadFile = File(...), count: int = Query(4,ge=2,le=6)):
     except Exception as exc: raise HTTPException(400,'Invalid JPEG or PNG artwork') from exc
     engine.palette = colors; artwork = data
     if engine.status == 'stopped': await engine.start()
-    elif engine.status == 'running': await engine.apply()
+    elif engine.status == 'running': await engine.apply(only_if_running=True)
     return {'palette':colors}
 class Palette(BaseModel):
     colors: list[str] = Field(min_length=2,max_length=6)
@@ -143,7 +143,7 @@ class Palette(BaseModel):
 async def palette(body:Palette):
     if any(not re.fullmatch(r'#[0-9a-fA-F]{6}',c) for c in body.colors): raise ValueError('Use #RRGGBB colors')
     engine.palette = body.colors
-    if engine.status == 'running': await engine.apply()
+    if engine.status == 'running': await engine.apply(only_if_running=True)
     return {'ok':True}
 @app.put('/api/settings')
 async def settings(body:Settings):
@@ -153,7 +153,7 @@ async def settings(body:Settings):
         if (old_mode in STREAM_MODES) != (body.mode in STREAM_MODES) or (old_mode=='music_brightness') != (body.mode=='music_brightness'):
             await engine.start()
         else:
-            await engine.apply()
+            await engine.apply(only_if_running=True)
     return {'ok':True}
 @app.put('/api/lights/{light_id}')
 async def light_settings(light_id:str, body:LightSettings):
@@ -196,13 +196,13 @@ class AudioInput(BaseModel):
     device_id: int = Field(ge=0)
 @app.post('/api/audio/start')
 async def start_audio(body:AudioInput):
-    if engine.status=='running' and (engine.settings.bpm_source=='audio' or engine.uses_audio_hits()):
+    if engine.status in ('running','waiting_audio') and (engine.settings.bpm_source=='audio' or engine.uses_audio_hits() or engine.white_music_active()):
         await engine.pause()
     await audio.start(body.device_id)
     return audio.status()
 @app.post('/api/audio/stop')
 async def stop_audio():
-    if engine.settings.mode in (*STREAM_MODES,'music_brightness') and (engine.settings.bpm_source == 'audio' or engine.uses_audio_hits()):
+    if engine.status in ('running','waiting_audio') and (engine.settings.bpm_source == 'audio' or engine.uses_audio_hits() or engine.white_music_active()):
         await engine.pause()
     await audio.stop()
     return audio.status()

@@ -22,9 +22,55 @@ class Engine:
         self.wake=asyncio.Event()
         self.white_task=None; self.rest_brightness={}; self.rest_error=None
         self.rest_lock=asyncio.Lock()
+        self.silence_since=None;self.sound_since=None;self.audio_checked_at=-float('inf')
+        self.waiting_restored=True;self.playback_message=None
 
     def uses_audio_hits(self):
         return self.settings.mode=='beat_flash' and self.settings.flash_trigger!='bpm'
+
+    def follows_audio(self):
+        return bool(self.audio and self.audio.running and hasattr(self.audio,'music_energy'))
+
+    def white_music_active(self):
+        return self.settings.mode in STREAM_MODES or (
+            self.settings.mode!='music_brightness' and self.settings.white_response=='music' and self.follows_audio())
+
+    def reset_audio_wait(self):
+        self.silence_since=None;self.sound_since=None;self.audio_checked_at=-float('inf')
+        self.playback_message=None;self.waiting_restored=True
+
+    async def check_audio(self):
+        # RMS covers the last second. Add two seconds of silence so brief musical
+        # gaps do not release the stream or repeatedly restore the bulbs.
+        now=time.monotonic()
+        if now-self.audio_checked_at<.25: return
+        self.audio_checked_at=now
+        async with self.lifecycle_lock:
+            if self.status not in ('running','waiting_audio') or not self.follows_audio():
+                self.silence_since=None;self.sound_since=None
+                return
+            energy=self.audio.music_energy()
+            if self.status=='running':
+                if energy is not None and energy>=.00005:
+                    self.silence_since=None
+                    return
+                if self.silence_since is None:self.silence_since=now
+                if now-self.silence_since<2:return
+                self.status='waiting_audio';self.waiting_restored=False;self.sound_since=None
+            if not self.waiting_restored:
+                await self._stop_stream()
+                await self._restore_snapshot(clear=False)
+                self.waiting_restored=True
+                self.playback_message='Lights restored after silence. Waiting for music to resume.'
+            if energy is None or energy<.00015:
+                self.sound_since=None
+                return
+            if self.sound_since is None:self.sound_since=now
+            if now-self.sound_since<.5:return
+            if self.settings.mode in STREAM_MODES and not self.uses_audio_hits() and self.beat_clock()[0] is None:
+                self.playback_message='Music resumed. Waiting for a reliable BPM before restarting the beat effect.'
+                return
+            await self._start()
 
     async def refresh(self):
         found=await self.client.discover_lights();old={light.id:light for light in self.lights}
@@ -43,6 +89,8 @@ class Engine:
 
     def music_factor(self, now):
         bpm,phase_at=self.beat_clock();low=self.settings.flash_low/100
+        if self.uses_audio_hits() and self.follows_audio():
+            bpm=self.audio.current_bpm();phase_at=self.audio.phase_at
         if bpm and phase_at is not None: return grouped_beat_factor(bpm,phase_at,now,low)
         energy=self.audio.music_energy() if self.audio and hasattr(self.audio,'music_energy') else None
         return energy_factor(energy,low) if energy is not None else 1
@@ -65,7 +113,7 @@ class Engine:
         failures=0
         while True:
             await asyncio.sleep(min(30,.25*2**failures))
-            if self.status!='running' or self.settings.mode not in STREAM_MODES: continue
+            if self.status!='running' or not self.white_music_active(): continue
             try:
                 await self.rest_music([light for light in self.lights if not light.color],steady=self.settings.white_response=='steady')
                 self.rest_error=None;failures=0
@@ -107,8 +155,10 @@ class Engine:
                     light.on=True;light.xy=xy;light.brightness=brightness;light.preview_color=color
                 await self.stream.send(values)
                 return
+            if self.status=='starting' and self.white_music_active():
+                await self.rest_music([light for light in self.lights if not light.color],force=True)
             for light in self.lights:
-                if not light.enabled: continue
+                if not light.enabled or (not light.color and self.white_music_active()): continue
                 offset=1 if light.role in ('COLOR_RIGHT','WHITE_RIGHT') else 0
                 color,factor=frame(self.settings,self.palette,elapsed,offset)
                 if self.settings.mode=='bpm' and self.settings.bpm_source=='audio':
@@ -135,68 +185,85 @@ class Engine:
 
     async def start(self):
         async with self.lifecycle_lock:
-            self.status='starting'
-            try:
-                await self._stop_stream()
-                await self.refresh()
-                if not any(light.enabled for light in self.lights):
-                    raise ValueError('No bulbs are enabled. Select Enable bulb or Enable all four in Your lights, then click Start.')
-                if self.settings.mode=='music_brightness' and not any(light.enabled and light.dimming for light in self.lights):
-                    raise ValueError('Enable at least one dimmable bulb for music brightness.')
-                if self.uses_audio_hits() and not (self.audio and self.audio.running):
-                    raise ValueError('Start listening to BlackHole before using bass or drum-triggered flashes. A BPM estimate is not required.')
-                if self.settings.mode in STREAM_MODES and not self.uses_audio_hits() and self.beat_clock()[0] is None:
-                    raise ValueError('Start audio detection and wait for a reliable BPM, or choose Manual BPM before starting beat effects.')
-                if self.snapshot is None: self.snapshot=[]
-                captured={light.id for light in self.snapshot}
-                self.snapshot.extend(light.model_copy(deep=True) for light in self.lights if light.enabled and light.id not in captured)
-                self.started=time.monotonic()
-                if self.settings.mode in STREAM_MODES:
-                    stream=self.stream_factory(self.client)
-                    await stream.start(self.lights)
-                    self.stream=stream
-                self.hit_flashes.reset(getattr(self.audio,'hit_counter',0))
-                await self.apply()
-            except Exception as exc:
-                self.status='stopped';self.error=str(exc)
-                try: await self._stop_stream()
-                except Exception: pass
-                raise
-            self.status='running';self.error=None
+            await self._start()
+
+    async def _start(self):
+        self.reset_audio_wait()
+        self.status='starting'
+        had_snapshot=self.snapshot is not None
+        try:
+            await self._stop_stream()
+            await self.refresh()
+            if not any(light.enabled for light in self.lights):
+                raise ValueError('No bulbs are enabled. Select Enable bulb or Enable all four in Your lights, then click Start.')
+            if self.settings.mode=='music_brightness' and not any(light.enabled and light.dimming for light in self.lights):
+                raise ValueError('Enable at least one dimmable bulb for music brightness.')
+            if self.uses_audio_hits() and not (self.audio and self.audio.running):
+                raise ValueError('Start listening to BlackHole before using bass or drum-triggered flashes. A BPM estimate is not required.')
+            silent=self.follows_audio() and (self.audio.music_energy() or 0)<.00005
+            if not silent and self.settings.mode in STREAM_MODES and not self.uses_audio_hits() and self.beat_clock()[0] is None:
+                raise ValueError('Start audio detection and wait for a reliable BPM, or choose Manual BPM before starting beat effects.')
+            if self.snapshot is None: self.snapshot=[]
+            captured={light.id for light in self.snapshot}
+            self.snapshot.extend(light.model_copy(deep=True) for light in self.lights if light.enabled and light.id not in captured)
+            if silent:
+                if had_snapshot:await self._restore_snapshot(clear=False)
+                self.status='waiting_audio'
+                self.playback_message='Waiting for music. Lights remain in their original state.'
+                return
+            self.started=time.monotonic()
             if self.settings.mode in STREAM_MODES:
-                self.white_task=asyncio.create_task(self.white_music())
-            self.wake.set()
+                stream=self.stream_factory(self.client)
+                await stream.start(self.lights)
+                self.stream=stream
+            self.hit_flashes.reset(getattr(self.audio,'hit_counter',0))
+            await self.apply()
+        except Exception as exc:
+            self.status='stopped';self.error=str(exc)
+            try: await self._stop_stream()
+            except Exception: pass
+            raise
+        self.status='running';self.error=None
+        self.white_task=asyncio.create_task(self.white_music())
+        self.wake.set()
+
 
     async def pause(self):
         async with self.lifecycle_lock:
-            self.status='paused';await self._stop_stream()
+            self.status='paused';self.reset_audio_wait();await self._stop_stream()
 
     async def stop(self):
         async with self.lifecycle_lock:
-            self.status='stopped';await self._stop_stream()
+            self.status='stopped';self.reset_audio_wait();await self._stop_stream()
+
+    async def _restore_snapshot(self, *, clear=True):
+        async with self.lock:
+            for light in self.snapshot or []:
+                payload=command(light,light.brightness,duration=self.settings.transition,on=light.on)
+                if light.color and light.xy: payload['color']={'xy':dict(zip(('x','y'),light.xy))}
+                await self.client.update(light.id,payload)
+            if clear:self.snapshot=None
+        await self.refresh()
 
     async def restore(self):
         async with self.lifecycle_lock:
-            self.status='stopped';await self._stop_stream()
-            async with self.lock:
-                for light in self.snapshot or []:
-                    payload=command(light,light.brightness,duration=self.settings.transition,on=light.on)
-                    if light.color and light.xy: payload['color']={'xy':dict(zip(('x','y'),light.xy))}
-                    await self.client.update(light.id,payload)
-                self.snapshot=None
-            await self.refresh()
+            self.status='stopped';self.reset_audio_wait();await self._stop_stream()
+            await self._restore_snapshot()
 
     async def run(self):
         failures=0
         while True:
-            interval=(.05 if self.settings.mode in STREAM_MODES else .25 if self.settings.mode=='music_brightness' else 2) if self.status=='running' else 2
+            interval=.05 if self.status=='running' and self.settings.mode in STREAM_MODES else .25 if self.follows_audio() or (self.status=='running' and self.settings.mode=='music_brightness') else 2
             try:
                 await asyncio.wait_for(self.wake.wait(),timeout=min(30,interval*2**failures))
             except asyncio.TimeoutError:
                 pass
             self.wake.clear()
-            if self.status!='running' or self.settings.mode=='static': continue
             try:
+                await self.check_audio()
+                if self.status!='running' or self.settings.mode=='static':
+                    failures=0
+                    continue
                 await self.apply(time.monotonic()-self.started,only_if_running=True)
                 self.error=None;failures=0
             except Exception as exc:
