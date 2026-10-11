@@ -1,5 +1,6 @@
 from typing import Literal
 from pydantic import BaseModel, Field, model_validator
+from app.audio.bpm import MIN_TEMPO, MAX_TEMPO
 Role = Literal['COLOR_LEFT', 'COLOR_RIGHT', 'WHITE_LEFT', 'WHITE_RIGHT']
 class Light(BaseModel):
     id: str
@@ -25,20 +26,24 @@ class Settings(BaseModel):
     white_fill: float = Field(default=25, ge=1, le=100)
     transition: float = Field(default=3, ge=1, le=30)
     speed: float = Field(default=15, ge=4, le=120)
-    bpm: float = Field(default=100, ge=30, le=240)
+    bpm: float = Field(default=100, ge=MIN_TEMPO, le=MAX_TEMPO)
 
-    bpm_source: Literal['manual', 'audio'] = 'manual'
+    bpm_source: Literal['manual', 'audio'] = 'audio'
     flash_low: float = Field(default=20, ge=0, le=80)
     beat_every: Literal[1, 2, 4] = 1
-    flash_trigger: Literal['bpm', 'percussion', 'frequency', 'bass', 'bass_drums'] = 'bpm'
+    flash_trigger: Literal['bpm', 'percussion', 'bands', 'frequency', 'bass', 'bass_drums'] = 'bpm'
     flash_pattern: Literal['together', 'staggered'] = 'together'
     roll_max_hz: float = Field(default=8, ge=3, le=8)
     flash_sensitivity: float = Field(default=50, ge=1, le=100)
+    drum_isolation: Literal['stems', 'fast'] = 'stems'
     white_response: Literal['music', 'steady'] = 'music'
+    white_floor: float = Field(default=20, ge=0, le=80)
+    white_pattern: Literal['together', 'alternate'] = 'together'
     pulse_palette: Literal['cycle', 'fixed'] = 'cycle'
     palette_every: Literal[1, 2, 4, 8] = 4
     timing_offset_ms: float = Field(default=0, ge=0, le=250)
     drop_response: Literal['accent', 'off'] = 'accent'
+    palette_size: int = Field(default=4, ge=2, le=6)
     bass_threshold_db: float = Field(default=-15, ge=-90, le=0)
     bass_fallback_db: float = Field(default=-70, ge=-90, le=0)
     mids_threshold_db: float = Field(default=-20, ge=-90, le=0)

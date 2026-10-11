@@ -4,7 +4,7 @@ import time
 from collections import deque
 from contextlib import suppress
 import numpy as np
-from app.audio.bpm import detect_bpm, align_beat_phase
+from app.audio.bpm import detect_bpm, align_beat_phase, TempoTracker, MIN_TEMPO, MAX_TEMPO
 from app.audio.onsets import HitDetector
 from app.audio.percussion import PercussionDetector
 from app.audio.spectrum import WINDOW_SIZE, analyze_spectrum
@@ -40,15 +40,15 @@ class LiveBPM:
     def __init__(self):
         self.stream = None; self.task = None; self.running = False
         self.buffer = deque(); self.frames = 0; self.lock = threading.Lock()
-        self.sample_rate = 48000; self.device_name = None; self.bpm = None
+        self.sample_rate = 48000; self.device_name = None; self.device_id = None; self.bpm = None
         self.confidence = 0; self.phase_at = None; self.last_good_at = 0
         self.error = None; self.rms = 0; self.end_time = 0
-        self.pending_tempo = None
+        self.pending_tempo = None; self.tempo = TempoTracker(); self.tempo_scale = 1
         self.lifecycle_lock = asyncio.Lock()
         self.hit_detector = None; self.hits = deque(maxlen=256); self.hit_counter = 0
         self.received_frames=0;self.channel_levels=[];self.analysis_channel=0
         self.callback_error=None;self.started_at=0;self.last_analysis=-float('inf')
-        self.percussion_sensitivity=50
+        self.percussion_sensitivity=50;self.drum_isolation=True
         self.frequency=None;self.frequency_settings=(-15,-70,-20)
         self.percussion=None;self.drops=deque(maxlen=16);self.drop_counter=0;self.capture_latency=0;self.generation=0
 
@@ -67,8 +67,10 @@ class LiveBPM:
             elif self.rms<.00005:capture_state='no_signal'
             else:capture_state='tracking' if self.current_bpm() else 'listening'
         return {'running': self.running, 'device': self.device_name, 'bpm': self.current_bpm(),
+                'tempo_locked': bool(self.tempo.locked and self.current_bpm()), 'tempo_scale': self.tempo_scale,
+                'device_id': self.device_id,
                 'confidence': self.confidence, 'rms': self.rms, 'error': self.error,
-                'warming_up': self.running and not self.error and self.frames < self.sample_rate * 8,
+                'warming_up': self.running and not self.error and self.frames < self.sample_rate * 6,
                 'bass_level': self.hit_detector.levels['bass'] if self.hit_detector else 0,
                 'drum_level': self.hit_detector.levels['drum'] if self.hit_detector else 0,
                 'hit_count': hit_count, 'last_hit': last_hit,
@@ -151,7 +153,7 @@ class LiveBPM:
         with self.lock:
             self.generation+=1;self.buffer.clear();self.frames=0
             self.bpm=None;self.phase_at=None;self.confidence=0;self.last_good_at=0
-            self.pending_tempo=None;self.last_analysis=-float('inf')
+            self.pending_tempo=None;self.last_analysis=-float('inf');self.tempo.reset();self.tempo_scale=1
             self.hits.clear();self.drops.clear()
             if self.running:
                 self.hit_detector=HitDetector(self.sample_rate)
@@ -159,7 +161,15 @@ class LiveBPM:
                 self.frequency=FrequencyDetector(self.sample_rate,*self.frequency_settings)
 
     def current_bpm(self):
-        return self.bpm if self.running and time.monotonic()-self.last_good_at < 6 else None
+        if not (self.bpm and self.running and time.monotonic()-self.last_good_at < 6): return None
+        return self.bpm*self.tempo_scale
+
+    def scale_tempo(self, factor):
+        """DJ-style ×2 / ½ correction for the current track; resets on track change."""
+        scale = self.tempo_scale*factor
+        if not 1/8 <= scale <= 8 or (self.bpm and not MIN_TEMPO <= self.bpm*scale <= MAX_TEMPO):
+            raise ValueError(f'Tempo correction would leave the {MIN_TEMPO}–{MAX_TEMPO} BPM range')
+        self.tempo_scale = 1 if abs(scale-1) < 1e-9 else scale
 
     async def start(self, device_id):
         async with self.lifecycle_lock:
@@ -174,7 +184,7 @@ class LiveBPM:
         self.generation+=1
         self.sample_rate = device['sample_rate']; self.device_name = device['name']
         self.buffer.clear(); self.frames = 0; self.bpm = None; self.phase_at = None
-        self.error = None; self.pending_tempo = None
+        self.error = None; self.pending_tempo = None; self.tempo.reset(); self.tempo_scale = 1; self.device_id = device_id
         self.received_frames=0;self.channel_levels=[];self.analysis_channel=0
         self.callback_error=None;self.started_at=time.monotonic();self.last_analysis=-float('inf')
         self.hit_detector = HitDetector(self.sample_rate)
@@ -194,7 +204,8 @@ class LiveBPM:
                 self.rms=max(float(levels.max()),self.rms*np.exp(-len(mono)/(self.sample_rate*.25)))
                 with self.lock:
                     percussion=self.percussion;hit_detector=self.hit_detector;generation=self.generation;frequency=self.frequency
-                hits=hit_detector.process(mono,end)+percussion.process(mono,end,bpm=self.current_bpm(),sensitivity=self.percussion_sensitivity)
+                hits=hit_detector.process(mono,end)+percussion.process(mono,end,bpm=self.current_bpm(),sensitivity=self.percussion_sensitivity,isolate=self.drum_isolation)
+                hits.extend(percussion.band_hits)
                 frequency_hits=frequency.process(mono,end)
                 hits.extend(frequency_hits)
                 hits.sort(key=lambda hit:hit['at'])
@@ -250,28 +261,25 @@ class LiveBPM:
                 self.bpm=None;self.confidence=0;self.phase_at=None
                 self.error='Audio frames are arriving but contain silence. Play music and route its output to BlackHole using a Multi-Output Device.'
                 continue
-            if self.frames<self.sample_rate*8:
+            if self.frames<self.sample_rate*6:
                 self.error=None
                 continue
-            if now-self.last_analysis<2:continue
+            if now-self.last_analysis<1:continue
             self.last_analysis=now
             try:
                 generation=self.generation
-                result = await asyncio.to_thread(detect_bpm, samples, self.sample_rate, self.bpm)
+                result = await asyncio.to_thread(detect_bpm, samples, self.sample_rate, self.tempo.bpm)
                 if generation!=self.generation:continue
                 if not result:
-                    self.bpm = None; self.confidence = 0; self.phase_at = None
-                    self.error = 'Audio is present, but no stable BPM is detected yet. Percussion triggers and music brightness can still follow the audio; try a rhythmic section or Manual BPM.'
+                    self.confidence = 0
+                    self.error = 'Audio is present, but no steady beat yet. Drum-triggered effects still follow the music.'
                     continue
-                new = result['bpm']
-                if self.bpm and abs(new-self.bpm) > self.bpm*.08:
-                    if self.pending_tempo is None or abs(new-self.pending_tempo)>3:
-                        self.pending_tempo = new
-                        continue
-                self.pending_tempo = None
-                phase_anchor=self.phase_at if self.bpm and abs(new-self.bpm)<=self.bpm*.08 else None
-                self.bpm = new if not self.bpm or abs(new-self.bpm)>self.bpm*.08 else .65*self.bpm+.35*new
+                old = self.bpm
+                self.bpm = self.tempo.update(result['bpm'])
+                if self.bpm is None: continue
+                phase_anchor=self.phase_at if old and abs(self.bpm-old)<=old*.04 else None
                 self.confidence = result['confidence']; self.last_good_at = time.monotonic()
+                # Phase follows the tracked tempo; the newest window gives the latest beat.
                 self.phase_at = align_beat_phase(phase_anchor,end-result['duration']+result['last_beat_seconds'],self.bpm)
                 self.error = None
             except Exception as exc:

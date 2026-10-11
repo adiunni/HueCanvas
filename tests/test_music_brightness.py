@@ -66,7 +66,7 @@ def test_brightness_only_changes_all_dimmable_lamps_without_color_writes(monkeyp
     now=[100.];monkeypatch.setattr(module.time,'monotonic',lambda:now[0])
     async def scenario():
         client=MockClient();client.lights[0].xy=[.2,.3]
-        engine=Engine(client);engine.settings=Settings(mode='music_brightness',bpm=120)
+        engine=Engine(client);engine.settings=Settings(mode='music_brightness',bpm=120,bpm_source='manual')
         await engine.start()
         assert engine.stream is None and len(client.commands)==4
         assert all('color' not in p and 'color_temperature' not in p for _,p in client.commands)
@@ -89,7 +89,7 @@ def test_streaming_whites_have_music_or_steady_brightness_targets(monkeypatch):
     now=[100.];monkeypatch.setattr(module.time,'monotonic',lambda:now[0])
     async def scenario():
         client=MockClient();engine=Engine(client)
-        engine.settings=Settings(mode='beat_flash',bpm=120,white_response='music')
+        engine.settings=Settings(mode='beat_flash',bpm=120,white_response='music',bpm_source='manual')
         await engine.start()
         assert len(client.commands)==2
         now[0]=102.1
@@ -115,7 +115,7 @@ def test_white_rest_does_not_block_fast_color_frames():
                 if self.block and id=='2':
                     entered.set();await release.wait()
                 await super().update(id,payload)
-        client=Client();engine=Engine(client);engine.settings=Settings(mode='beat_flash')
+        client=Client();engine=Engine(client);engine.settings=Settings(mode='beat_flash',bpm_source='manual')
         await engine.start();client.block=True
         task=asyncio.create_task(engine.rest_music([l for l in engine.lights if not l.color],force=True))
         try:

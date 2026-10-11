@@ -104,7 +104,7 @@ def test_area_selection_excludes_white_and_unselected_devices():
 def test_mock_beat_frames_keep_white_fill_on_rest_and_restore():
     async def scenario():
         client=MockClient();engine=Engine(client);await engine.refresh()
-        engine.settings=Settings(mode='beat_flash',bpm=120,flash_low=20)
+        engine.settings=Settings(mode='beat_flash',bpm=120,flash_low=20,bpm_source='manual')
         await engine.start()
         stream=engine.stream
         assert stream and stream.mock
@@ -151,13 +151,16 @@ def test_audio_api_and_stop_terminates_beat_effect(monkeypatch,tmp_path):
         async def stop(self): self.running=False
     monkeypatch.setattr(config,'MOCK_MODE',True);monkeypatch.setattr(config,'MUSIC_ENABLED',False);monkeypatch.setattr(config,'DATA_DIR',tmp_path)
     monkeypatch.setattr(main,'audio',Audio())
-    monkeypatch.setattr(main,'input_devices',lambda:[{'id':1,'name':'BlackHole 2ch','loopback':True}])
+    devices=[]
+    monkeypatch.setattr(main,'input_devices',lambda:devices)
     with TestClient(main.app) as client:
-        assert client.get('/api/audio/devices').json()['devices'][0]['loopback']
         assert client.put('/api/settings',json={'mode':'beat_gentle','bpm_source':'audio'}).status_code==200
-        assert client.post('/api/control/start').status_code==400
-        assert client.post('/api/audio/start',json={'device_id':1}).status_code==200
-        assert client.post('/api/control/start').status_code==200
+        # Start listens by itself, but only on a loopback input.
+        response=client.post('/api/control/start')
+        assert response.status_code==400 and 'BlackHole' in response.json()['detail'] and not main.audio.running
+        devices.append({'id':1,'name':'BlackHole 2ch','loopback':True})
+        assert client.get('/api/audio/devices').json()['devices'][0]['loopback']
+        assert client.post('/api/control/start').status_code==200 and main.audio.running
         assert client.get('/api/state').json()['streaming']
         stream = main.engine.stream
         rest_count = len(main.engine.client.commands)

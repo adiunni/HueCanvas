@@ -29,6 +29,13 @@ class Engine:
     def uses_audio_hits(self):
         return self.settings.mode in STREAM_MODES and self.settings.flash_trigger!='bpm'
 
+    def pulse_trigger(self):
+        """The trigger in effect: the BPM clock follows drum hits until a tempo locks."""
+        trigger=self.settings.flash_trigger
+        if trigger=='bpm' and self.settings.bpm_source=='audio' and self.follows_audio() and self.beat_clock()[0] is None:
+            return 'percussion'
+        return trigger
+
     def follows_audio(self):
         return bool(self.audio and self.audio.running and hasattr(self.audio,'music_energy'))
 
@@ -68,7 +75,7 @@ class Engine:
                 return
             if self.sound_since is None:self.sound_since=now
             if now-self.sound_since<.5:return
-            if self.settings.mode in STREAM_MODES and not self.uses_audio_hits() and self.beat_clock()[0] is None:
+            if self.settings.mode in STREAM_MODES and self.pulse_trigger()=='bpm' and self.beat_clock()[0] is None:
                 self.playback_message='Music resumed. Waiting for a reliable BPM before restarting the beat effect.'
                 return
             await self._start()
@@ -105,19 +112,26 @@ class Engine:
 
     async def rest_music(self, lights, *, steady=False, force=False):
         async with self.rest_lock:
-            now=time.monotonic();factor=1 if steady else self.music_factor(now)
+            now=time.monotonic()
+            # White lamps use their own floor and pattern; colour bulbs (brightness-only
+            # mode) keep the pulse floor.
+            white_low=self.settings.white_floor/100
+            factor=1 if steady else self.music_factor(now)
+            # Rescale the pulse-floor envelope onto the white floor.
+            colour_low=self.settings.flash_low/100
+            white_factor=1 if steady else white_low+(1-white_low)*max(0,factor-colour_low)/max(1e-9,1-colour_low)
             whites=sorted((l for l in lights if not l.color and l.enabled),
                 key=lambda l:({'WHITE_LEFT':0,'WHITE_RIGHT':1}.get(l.role,2),l.id))
             white_factors={}
             bpm,phase_at=self.beat_clock()
             if self.uses_audio_hits() and self.follows_audio():
                 bpm=self.audio.current_bpm();phase_at=self.audio.phase_at
-            if not steady and bpm and phase_at is not None and self.settings.flash_pattern=='staggered':
-                white_factors=dict(zip((l.id for l in whites),grouped_beat_factors(bpm,phase_at,now,len(whites),'staggered',self.settings.flash_low/100)))
+            if not steady and bpm and phase_at is not None and self.settings.white_pattern=='alternate':
+                white_factors=dict(zip((l.id for l in whites),grouped_beat_factors(bpm,phase_at,now,len(whites),'staggered',white_low)))
             for light in lights:
                 if not light.enabled or not light.dimming: continue
                 peak=self.settings.brightness if light.color else self.settings.white_fill
-                brightness=max(1,round(peak*white_factors.get(light.id,factor),1))
+                brightness=max(1,round(peak*white_factors.get(light.id,factor if light.color else white_factor),1))
                 previous=self.rest_brightness.get(light.id)
                 if previous and not force:
                     if now-previous[1]<2 or abs(brightness-previous[0])<1: continue
@@ -152,11 +166,11 @@ class Engine:
                 if phase_at is not None:phase_at+=offset_seconds
                 colors=sorted((light for light in self.lights if light.enabled and light.color),
                               key=lambda light:({'COLOR_LEFT':0,'COLOR_RIGHT':1}.get(light.role,2),light.id))
-                factors=[1]*len(colors)
-                if self.uses_audio_hits():
+                factors=[1]*len(colors);trigger=self.pulse_trigger()
+                if trigger!='bpm':
                     if self.audio and self.audio.running:
                         factors=self.hit_flashes.factors(self.audio.recent_hits(self.hit_flashes.cursor),now,len(colors),
-                            self.settings.flash_trigger,self.settings.flash_pattern,self.settings.flash_sensitivity,self.settings.beat_every,low,
+                            trigger,self.settings.flash_pattern,self.settings.flash_sensitivity,self.settings.beat_every,low,
                             mode=self.settings.mode,offset=offset_seconds,period=60/(bpm or 120),accent=now<self.drop_until,roll_max_hz=self.settings.roll_max_hz)
                 elif bpm and phase_at is not None:
                     if self.settings.mode=='beat_flash':
@@ -226,8 +240,8 @@ class Engine:
             if self.uses_audio_hits() and not (self.audio and self.audio.running):
                 raise ValueError('Start listening to BlackHole before using audio-triggered pulses or flashes. A BPM estimate is not required.')
             silent=self.follows_audio() and (self.audio.music_energy() or 0)<.00005
-            if not silent and self.settings.mode in STREAM_MODES and not self.uses_audio_hits() and self.beat_clock()[0] is None:
-                raise ValueError('Start audio detection and wait for a reliable BPM, or choose Manual BPM before starting beat effects.')
+            if not silent and self.settings.mode in STREAM_MODES and self.pulse_trigger()=='bpm' and self.beat_clock()[0] is None:
+                raise ValueError('Listening is not running, so there is no tempo yet. Choose a manual tempo or check Audio setup.')
             if self.snapshot is None: self.snapshot=[]
             captured={light.id for light in self.snapshot}
             self.snapshot.extend(light.model_copy(deep=True) for light in self.lights if light.enabled and light.id not in captured)

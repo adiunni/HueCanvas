@@ -64,7 +64,7 @@ def test_silence_restores_then_resumes_without_losing_original_state(monkeypatch
     asyncio.run(scenario())
 
 
-def test_silent_start_keeps_lights_unchanged_and_waits_for_bpm(monkeypatch):
+def test_silent_start_keeps_lights_unchanged_then_follows_drums_until_bpm_locks(monkeypatch):
     import app.animation.engine as module
     now=[100.];monkeypatch.setattr(module.time,'monotonic',lambda:now[0])
     async def scenario():
@@ -77,10 +77,10 @@ def test_silent_start_keeps_lights_unchanged_and_waits_for_bpm(monkeypatch):
         engine.audio.energy=.02
         now[0]=101.;await engine.check_audio()
         now[0]=101.6;await engine.check_audio()
-        assert engine.status=='waiting_audio' and 'reliable BPM' in engine.playback_message
+        # Music resumes before a tempo locks: pulses follow drum hits meanwhile.
+        assert engine.status=='running' and engine.stream is not None and engine.pulse_trigger()=='percussion'
         engine.audio.bpm=120
-        now[0]=102.;await engine.check_audio()
-        assert engine.status=='running' and engine.stream is not None
+        assert engine.pulse_trigger()=='bpm'
         await engine.stop()
     asyncio.run(scenario())
 

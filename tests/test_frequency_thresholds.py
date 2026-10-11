@@ -172,7 +172,7 @@ def test_api_threshold_edits_reconfigure_capture_and_clear_old_crossings(monkeyp
         assert client.put('/api/settings', json=values).status_code == 422
         assert audio.frequency.gate.fallback == -60
         page = client.get('/').text
-        assert 'value="frequency"' in page and 'id="bass_threshold_db"' in page
+        assert 'value="frequency"' in page and 'data-setting="bass_threshold_db"' in page
         assert client.post('/api/audio/stop').status_code == 200
         assert audio.frequency is None
 

@@ -9,6 +9,7 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, UploadFile, File, Query, Request
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from typing import Literal
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 from app import config
@@ -17,6 +18,7 @@ from app.hue.client import HueClient
 from app.hue.discovery import discover, validate_ip
 from app.hue.models import LightSettings, Settings
 from app.animation.engine import Engine
+from app.animation.beats import palette_color
 from app.palette.extract import extract_palette
 from app.music.apple_music import AppleMusic
 from app.music.sync import ArtworkSync
@@ -63,26 +65,31 @@ def music_payload():
             'palette':engine.palette if engine else None,'error':music_error}
 
 
+def publish_music():
+    global music_revision
+    music_revision+=1
+    payload=music_payload()
+    for queue in tuple(music_subscribers):
+        if queue.full():queue.get_nowait()
+        queue.put_nowait(payload)
+
+
 async def music_update(kind,value):
-    global music_track,music_error,music_revision,artwork
+    global music_track,music_error,artwork
     if kind=='track':
         music_track=value;artwork=None;music_error=None
         if audio.running and hasattr(audio,'track_changed'):audio.track_changed()
     elif kind=='artwork':artwork=value;music_error=None
     elif kind=='palette':engine.palette=value;music_error=None
     elif kind=='error':music_error='Music artwork unavailable; upload manually. '+value
-    music_revision+=1
-    payload=music_payload()
-    for queue in tuple(music_subscribers):
-        if queue.full():queue.get_nowait()
-        queue.put_nowait(payload)
+    publish_music()
     if kind=='palette' and engine.status=='running':
         try:await engine.apply(only_if_running=True)
         except Exception as exc:engine.error=str(exc)
 
 
 async def music_sync():
-    sync=ArtworkSync(music,config.DATA_DIR,music_update)
+    sync=ArtworkSync(music,config.DATA_DIR,music_update,palette_size=lambda:engine.settings.palette_size)
     await sync.run()
 
 @asynccontextmanager
@@ -152,11 +159,12 @@ async def get_artwork():
     return Response(artwork,media_type='image/png' if artwork.startswith(b'\x89PNG') else 'image/jpeg',headers={'Cache-Control':'private, max-age=60'})
 
 @app.post('/api/artwork')
-async def upload(file: UploadFile = File(...), count: int = Query(4,ge=2,le=6)):
+async def upload(file: UploadFile = File(...), count: int | None = Query(None,ge=2,le=6)):
     global artwork
     data = await file.read(10*1024*1024+1)
     if len(data)>10*1024*1024: raise HTTPException(413,'Artwork must be under 10 MB')
-    try: colors = await run_in_threadpool(extract_palette,data,count)
+    if count: engine.settings = engine.settings.model_copy(update={'palette_size':count})
+    try: colors = await run_in_threadpool(extract_palette,data,engine.settings.palette_size)
     except Exception as exc: raise HTTPException(400,'Invalid JPEG or PNG artwork') from exc
     engine.palette = colors; artwork = data
     if engine.status == 'stopped': await engine.start()
@@ -170,16 +178,29 @@ async def palette(body:Palette):
     engine.palette = body.colors
     if engine.status == 'running': await engine.apply(only_if_running=True)
     return {'ok':True}
+async def resize_palette(size):
+    # Re-cluster the current artwork; without artwork, keep the edited swatches
+    # and blend between them to add colors.
+    old=list(engine.palette)
+    if artwork is not None:
+        try: colors=await run_in_threadpool(extract_palette,artwork,size)
+        except Exception as exc: raise HTTPException(400,'Cannot re-extract the artwork palette') from exc
+    elif size<=len(old): colors=old[:size]
+    else: colors=[palette_color(old,i*len(old)/size) for i in range(size)]
+    engine.palette=colors;publish_music()
 @app.put('/api/settings')
 async def settings(body:Settings):
     old_settings = engine.settings
     old_mode = old_settings.mode
     engine.settings = body
     if hasattr(audio,'percussion_sensitivity'): audio.percussion_sensitivity=body.flash_sensitivity
+    if hasattr(audio,'drum_isolation'): audio.drum_isolation=body.drum_isolation=='stems'
     if hasattr(audio,'set_frequency_thresholds'):
         audio.set_frequency_thresholds(body.bass_threshold_db,body.bass_fallback_db,body.mids_threshold_db)
-    if old_mode!=body.mode or old_settings.flash_trigger!=body.flash_trigger or any(getattr(old_settings,key)!=getattr(body,key) for key in ('bass_threshold_db','bass_fallback_db','mids_threshold_db','flash_sensitivity','roll_max_hz')):
+    if old_mode!=body.mode or old_settings.flash_trigger!=body.flash_trigger or any(getattr(old_settings,key)!=getattr(body,key) for key in ('bass_threshold_db','bass_fallback_db','mids_threshold_db','flash_sensitivity','roll_max_hz','drum_isolation')):
         engine.hit_flashes.reset(getattr(audio,'hit_counter',0))
+    if old_settings.palette_size!=body.palette_size:
+        await resize_palette(body.palette_size)
     if engine.status == 'running':
         if (old_mode in STREAM_MODES) != (body.mode in STREAM_MODES) or (old_mode=='music_brightness') != (body.mode=='music_brightness'):
             await engine.start()
@@ -203,12 +224,40 @@ async def identify(light_id:str):
     if not light: raise HTTPException(404,'Light not found')
     async with engine.lock: await engine.client.update(light_id,{'identify':{'action':'identify'}})
     return {'ok':True}
+def needs_audio(settings):
+    # Ambient looks never open capture by themselves; their white lamps follow
+    # music only when listening is already on.
+    return settings.mode in STREAM_MODES or settings.mode=='music_brightness'
+
+async def choose_input(device_id=None):
+    """The requested input, else the last one used, else a BlackHole loopback."""
+    if device_id is not None: return device_id
+    if getattr(audio,'device_id',None) is not None: return audio.device_id
+    devices=await run_in_threadpool(input_devices)
+    loopback=next((d for d in devices if d['loopback']),None)
+    if loopback is None:
+        raise ValueError('No BlackHole input found. Open Audio setup to choose an input and route Mac sound through it.')
+    return loopback['id']
+
+async def listen(device_id=None):
+    if hasattr(audio,'set_frequency_thresholds'):
+        audio.set_frequency_thresholds(engine.settings.bass_threshold_db,engine.settings.bass_fallback_db,engine.settings.mids_threshold_db)
+    if hasattr(audio,'percussion_sensitivity'): audio.percussion_sensitivity=engine.settings.flash_sensitivity
+    if hasattr(audio,'drum_isolation'): audio.drum_isolation=engine.settings.drum_isolation=='stems'
+    await audio.start(await choose_input(device_id))
+
 @app.post('/api/control/{action}')
 async def control(action:str):
-    if action == 'start': await engine.start()
+    if action == 'start':
+        # Pressing Start on a music-reactive look starts listening too; capture
+        # still begins only on this explicit action.
+        if needs_audio(engine.settings) and not audio.running: await listen()
+        await engine.start()
     elif action == 'pause': await engine.pause()
     elif action == 'stop': await engine.stop()
-    elif action == 'restore': await engine.restore()
+    elif action == 'restore':
+        await engine.restore()
+        if audio.running: await audio.stop()
     elif action == 'refresh': await engine.refresh()
     else: raise HTTPException(404,'Unknown action')
     return {'ok':True}
@@ -227,15 +276,18 @@ class OutputRoute(BaseModel):
 async def route_audio(body:OutputRoute):
     return await run_in_threadpool(set_music_output,body.device_id)
 class AudioInput(BaseModel):
-    device_id: int = Field(ge=0)
+    device_id: int | None = Field(default=None, ge=0)
 @app.post('/api/audio/start')
 async def start_audio(body:AudioInput):
     if engine.status in ('running','waiting_audio') and (engine.settings.bpm_source=='audio' or engine.uses_audio_hits() or engine.white_music_active()):
         await engine.pause()
-    if hasattr(audio,'set_frequency_thresholds'):
-        audio.set_frequency_thresholds(engine.settings.bass_threshold_db,engine.settings.bass_fallback_db,engine.settings.mids_threshold_db)
-    if hasattr(audio,'percussion_sensitivity'): audio.percussion_sensitivity=engine.settings.flash_sensitivity
-    await audio.start(body.device_id)
+    await listen(body.device_id)
+    return audio.status()
+class TempoScale(BaseModel):
+    factor: Literal[0.5, 2]
+@app.post('/api/audio/tempo')
+async def scale_tempo(body:TempoScale):
+    audio.scale_tempo(body.factor)
     return audio.status()
 @app.post('/api/audio/stop')
 async def stop_audio():

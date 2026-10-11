@@ -1,11 +1,16 @@
 import math
 
-def effective_division(bpm, division):
+def effective_division(bpm, division, per_minute=180):
     # Keep hard flashes below three per second while retaining beat multiples.
-    return division * max(1, math.ceil(bpm/(180*division)))
+    return division * max(1, math.ceil(bpm/(per_minute*division)))
+
+def gentle_division(bpm, division):
+    # Gentle pulses stay at or below four per second (240 BPM): the 20 fps
+    # stream needs about five frames to draw a smooth swell.
+    return effective_division(bpm, division, 240)
 
 def pulse_factor(mode, bpm, now, phase_at, division=1, low=.2):
-    division = effective_division(bpm,division) if mode=='beat_flash' else division
+    division = effective_division(bpm,division) if mode=='beat_flash' else gentle_division(bpm,division)
     phase = ((now-phase_at)/(60/bpm*division)) % 1
     if mode=='beat_flash': return 1 if phase < .3 else low
     return low + (1-low)*(.5+.5*math.cos(2*math.pi*phase))
@@ -41,12 +46,13 @@ class HitFlashes:
             if trigger=='percussion' and hit['kind']!='percussion':continue
             if trigger=='bass_drums' and hit['kind'] not in ('bass','drum'):continue
             if trigger=='frequency' and hit['kind'] not in ('frequency_bass','frequency_mids'):continue
-            qualified = trigger=='percussion' and hit.get('qualified',False)
+            if trigger=='bands' and hit['kind']!='band':continue
+            qualified = trigger in ('percussion','bands') and hit.get('qualified',False)
             if (trigger!='frequency' and not qualified and hit['strength'] < threshold) or hit['at']-self.last_attack < .045: continue
             self.last_attack = hit['at']
             self.qualifying_hits += 1
             if (self.qualifying_hits-1) % division: continue
-            rolling = trigger=='percussion' and hit.get('roll',False)
+            rolling = trigger in ('percussion','bands') and hit.get('roll',False)
             rate = min(8,max(3,roll_max_hz)) if rolling else 3
             gap = 1/rate if mode=='beat_flash' else .08
             # Quantized 10 ms onset timestamps can differ slightly from a roll's
@@ -57,7 +63,10 @@ class HitFlashes:
             self.index = self.flashes % max(1, count); self.flashes += 1
             self.last_flash = began
             width = min(.15 if accent else .1, max(.05,.4/rate)) if rolling else (.15 if accent else .1)
-            self.until = began+width
+            # Drum confirmation can arrive after the attack; a sharp flash keeps
+            # its full width from the first rendered frame. Spacing uses `began`,
+            # and gentle pulses still join their envelope partway through.
+            self.until = max(began,now)+width
             if mode=='beat_gentle':
                 duration=min(.65,max(.12,period*(1.2 if accent else .85)))
                 if rolling and hit.get('roll_interval'):
@@ -72,7 +81,7 @@ class HitFlashes:
 
 def clock_gentle_factors(bpm, now, phase_at, count, pattern, division=1, low=.2):
     if pattern=='together' or count<=1:return [pulse_factor('beat_gentle',bpm,now,phase_at,division,low)]*count
-    period=60/bpm*division
+    period=60/bpm*gentle_division(bpm,division)
     cycle=period*max(1,count)
     factors=[]
     for i in range(count):

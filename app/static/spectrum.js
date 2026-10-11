@@ -97,7 +97,7 @@ function blendSpectrumColors(colors, levels) {
     // Lower volume dims the preview without changing its frequency weighting.
     swatch.style.opacity = latest?.ready && !latest.silent ? Math.min(1, Math.max(.2, Math.sqrt(latest.rms / .1))) : 1;
     const messages = {
-      idle: 'Choose BlackHole below and start listening to see the live spectrum.',
+      idle: 'Press Listen to BlackHole, or Start on a music look, to see the live spectrum.',
       waiting_input: 'Listening; waiting for audio frames from the selected input…',
       warming_up: 'Collecting the first short audio window…',
       stalled: 'Audio frames stopped arriving. Restart listening and check routing below.',
@@ -127,9 +127,11 @@ function blendSpectrumColors(colors, levels) {
       const rhythm = latest?.percussion;
       const family = {snare:'Snare-like attack',kick:'Kick-like attack',hat:'High percussion attack'};
       element('spectrumRhythm').textContent = !latest?.ready || !rhythm ? 'Drum pattern detection starts when listening.' : rhythm.roll_active ? `Drum roll · ${rhythm.roll_rate} attacks / second · ${family[rhythm.last_family] || 'repeated percussion'} · comparing the preceding ${rhythm.comparison_seconds} seconds` : `${family[rhythm.last_family] || 'Listening for drum patterns'} · comparing the preceding ${rhythm.comparison_seconds} seconds`;
+      if (rhythm?.drop_active) element('spectrumRhythm').textContent += ' · Drop energy rise detected';
+      if (rhythm?.lead_band && typeof state !== 'undefined' && state?.settings?.flash_trigger === 'bands') element('spectrumRhythm').textContent += rhythm.lead_band === 'bass' ? ' · Lights following bass changes' : ' · Lights following mid changes (bass dropped out)';
       const gate = latest?.threshold_gate;
       const selected = typeof state !== 'undefined' && state?.settings?.flash_trigger === 'frequency';
-      element('spectrumGate').textContent = !selected ? 'Select Frequency levels as the beat trigger to use band thresholds.' : !gate || !latest?.ready ? 'Frequency trigger: waiting for fresh audio.' : `Frequency trigger · bass ${gate.levels_db.bass.toFixed(1)} dBFS (trigger > ${gate.bass_threshold_db}) · mids ${gate.levels_db.mids.toFixed(1)} dBFS (trigger > ${gate.mids_threshold_db}) · ${gate.active_band === 'mids' ? 'mids selected: bass < ' + gate.bass_fallback_db + ' dBFS' : 'bass priority: mids blocked until bass < ' + gate.bass_fallback_db + ' dBFS'}`;
+      element('spectrumGate').textContent = !selected ? 'Choose Levels under Pulses follow to use these band thresholds.' : !gate || !latest?.ready ? 'Frequency trigger: waiting for fresh audio.' : `Frequency trigger · bass ${gate.levels_db.bass.toFixed(1)} dBFS (trigger > ${gate.bass_threshold_db}) · mids ${gate.levels_db.mids.toFixed(1)} dBFS (trigger > ${gate.mids_threshold_db}) · ${gate.active_band === 'mids' ? 'mids selected: bass < ' + gate.bass_fallback_db + ' dBFS' : 'bass priority: mids blocked until bass < ' + gate.bass_fallback_db + ' dBFS'}`;
       canvas.setAttribute('aria-label', latest?.ready && !latest.silent ? `Music spectrum; strongest frequency ${Math.round(latest.peak_frequency)} Hertz. ${latest.bands.map(band => `${band.label} ${band.db.toFixed(1)} dBFS`).join(', ')}` : message);
     }
     draw();

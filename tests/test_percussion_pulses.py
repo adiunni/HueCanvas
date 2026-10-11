@@ -99,7 +99,7 @@ def test_gentle_engine_cycles_colors_staggers_whites_and_applies_drop_once(monke
     async def scenario():
         client=MockClient();engine=Engine(client);engine.audio=Audio()
         engine.palette=['#ff0000','#0000ff','#00ff00','#ffff00']
-        engine.settings=Settings(mode='beat_gentle',bpm_source='audio',flash_pattern='staggered',palette_every=1)
+        engine.settings=Settings(mode='beat_gentle',bpm_source='audio',flash_pattern='staggered',white_pattern='alternate',palette_every=1)
         await engine.start()
         assert [l.brightness for l in client.lights[:2]]==[60,12]
         assert [l.brightness for l in client.lights[2:]]==[25,5]

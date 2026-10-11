@@ -26,8 +26,8 @@ def normalize_artwork(data):
 
 
 class ArtworkSync:
-    def __init__(self,provider,directory,on_update,*,poll_interval=.5):
-        self.provider=provider;self.directory=Path(directory);self.on_update=on_update
+    def __init__(self,provider,directory,on_update,*,poll_interval=.5,palette_size=lambda:4):
+        self.provider=provider;self.directory=Path(directory);self.on_update=on_update;self.palette_size=palette_size
         self.poll_interval=poll_interval;self.current=None;self.generation=0
         self.worker=None;self.loaded=False;self.retry_at=0;self.palette_cache=OrderedDict()
 
@@ -61,9 +61,10 @@ class ArtworkSync:
             path.write_bytes(data)
             # Deliver the image before doing the slower palette clustering.
             await self.on_update('artwork',data)
-            artwork_key=hashlib.sha256(data).hexdigest()
+            size=self.palette_size()
+            artwork_key=(hashlib.sha256(data).hexdigest(),size)
             if artwork_key not in self.palette_cache:
-                colors=await asyncio.to_thread(extract_palette,data,4)
+                colors=await asyncio.to_thread(extract_palette,data,size)
                 self.palette_cache[artwork_key]=colors
                 while len(self.palette_cache)>128:self.palette_cache.popitem(last=False)
             if generation!=self.generation:return

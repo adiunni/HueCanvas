@@ -106,7 +106,7 @@ def test_start_wakes_idle_animation_loop_for_prompt_stream_frames():
         task=asyncio.create_task(engine.run())
         await asyncio.sleep(0)
         try:
-            engine.settings=Settings(mode='beat_flash')
+            engine.settings=Settings(mode='beat_flash',bpm_source='manual')
             await engine.start()
             await asyncio.wait_for(next_frame.wait(),timeout=.5)
         finally:
@@ -156,11 +156,10 @@ def test_stopping_audio_pauses_bass_flashes_even_with_manual_bpm(monkeypatch,tmp
         async def stop(self): self.running=False
     monkeypatch.setattr(config,'MOCK_MODE',True);monkeypatch.setattr(config,'MUSIC_ENABLED',False)
     monkeypatch.setattr(config,'DATA_DIR',tmp_path);monkeypatch.setattr(main,'audio',Audio())
+    monkeypatch.setattr(main,'input_devices',lambda:[{'id':1,'name':'BlackHole 2ch','loopback':True}])
     with TestClient(main.app) as client:
         assert client.put('/api/settings',json={'mode':'beat_flash','flash_trigger':'bass_drums','flash_pattern':'staggered','bpm_source':'manual'}).status_code==200
-        assert client.post('/api/control/start').status_code==400
-        assert client.post('/api/audio/start',json={'device_id':1}).status_code==200
-        assert client.post('/api/control/start').status_code==200
+        assert client.post('/api/control/start').status_code==200 and main.audio.running
         assert client.post('/api/audio/stop').status_code==200
         state=client.get('/api/state').json()
         assert state['status']=='paused' and not state['streaming']
