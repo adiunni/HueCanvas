@@ -8,7 +8,7 @@
       <button id="start" data-action="start" class="primary">Start</button>
       <button data-action="pause">Pause</button>
       <button data-action="stop">Stop</button>
-      <button data-action="restore" title="End playback, stop listening and return the lights to how they were before Start">Restore</button>
+      <button data-action="restore" title="End playback, stop listening and return the lights to how they were before music began">Restore</button>
     </div>
   </div>
 </header>
@@ -154,6 +154,7 @@
 <section class="panel room">
   <div class="section-head"><h2>Your lights</h2>
     <div><button id="enableAll" type="button">Enable all four</button> <button data-action="refresh">Refresh</button></div></div>
+  <p class="hint">Unselected bulbs stay off during playback. Silence or Restore returns all bulbs to their original state.</p>
   <div id="lights"></div>
 </section>
 

@@ -123,7 +123,7 @@ def test_start_failure_is_persistent_and_new_selection_is_restorable():
         assert engine.error is None
         engine.lights[1].enabled=True
         await engine.start()
-        assert {l.id for l in engine.snapshot}=={'0','1'}
+        assert {l.id for l in engine.snapshot}=={'0','1','2','3'}
         await engine.restore()
         assert all(not l.on for l in backend.lights)
     asyncio.run(scenario())

@@ -232,7 +232,7 @@ async def light_settings(light_id:str, body:LightSettings):
     for key,value in body.model_dump().items(): setattr(light,key,value)
     engine.saved_settings[light_id] = body
     save_settings()
-    if engine.stream is not None: await engine.start()
+    await engine.reconfigure_lights()
     return {'ok':True}
 @app.post('/api/lights/{light_id}/identify')
 async def identify(light_id:str):

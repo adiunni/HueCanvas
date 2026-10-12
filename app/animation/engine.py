@@ -20,7 +20,7 @@ class Engine:
         self.stream=None; self.stream_factory=EntertainmentSession; self.audio=None
         self.hit_flashes=HitFlashes();self.beat_lock=BeatLock()
         self.wake=asyncio.Event()
-        self.white_task=None; self.rest_brightness={}; self.rest_error=None
+        self.white_task=None; self.rest_brightness={}; self.rest_off={}; self.rest_error=None
         self.rest_lock=asyncio.Lock()
         self.silence_since=None;self.sound_since=None;self.audio_checked_at=-float('inf')
         self.waiting_restored=True;self.playback_message=None
@@ -75,10 +75,10 @@ class Engine:
                 return
             if self.sound_since is None:self.sound_since=now
             if now-self.sound_since<.5:return
-            if self.settings.mode in STREAM_MODES and self.pulse_trigger()=='bpm' and self.beat_clock()[0] is None:
+            if self.settings.mode in STREAM_MODES and any(light.enabled and light.color for light in self.lights) and self.pulse_trigger()=='bpm' and self.beat_clock()[0] is None:
                 self.playback_message='Music resumed. Waiting for a reliable BPM before restarting the beat effect.'
                 return
-            await self._start()
+            await self._start(allow_empty=True)
 
     async def refresh(self):
         found=await self.client.discover_lights();old={light.id:light for light in self.lights}
@@ -109,6 +109,30 @@ class Engine:
             self.drop_cursor=drop['id']
             if self.settings.drop_response=='accent' and 0<=now-drop['at']<1:
                 self.palette_shift+=1;self.drop_until=now+.6
+
+    def capture_snapshot(self):
+        if self.snapshot is None: self.snapshot=[]
+        captured={light.id for light in self.snapshot}
+        # Unselected bulbs are also controlled while running, so save them before
+        # switching them off. Keep their original state across selection changes.
+        self.snapshot.extend(light.model_copy(deep=True) for light in self.lights if light.id not in captured)
+
+    async def off_unselected(self):
+        async with self.rest_lock:
+            if self.status not in ('starting','running'): return
+            self.capture_snapshot()
+            now=time.monotonic()
+            for light in self.lights:
+                if light.enabled:
+                    self.rest_off.pop(light.id,None)
+                    continue
+                self.rest_brightness.pop(light.id,None)
+                previous=self.rest_off.get(light.id)
+                if previous is not None and now-previous<2: continue
+                if previous is not None or light.on:
+                    await self.client.update(light.id,{'on':{'on':False},'dynamics':{'duration':1000}})
+                    light.on=False;light.preview_color=None
+                self.rest_off[light.id]=time.monotonic()
 
     async def rest_music(self, lights, *, steady=False, force=False):
         async with self.rest_lock:
@@ -143,12 +167,16 @@ class Engine:
         failures=0
         while True:
             await asyncio.sleep(min(30,.25*2**failures))
-            if self.status!='running' or not self.white_music_active(): continue
+            if self.status!='running': continue
             try:
-                await self.rest_music([light for light in self.lights if not light.color],steady=self.settings.white_response=='steady')
+                # Keep these slow REST updates separate from fast color frames,
+                # including in Static and when the white response is steady.
+                await self.off_unselected()
+                if self.white_music_active():
+                    await self.rest_music([light for light in self.lights if not light.color],steady=self.settings.white_response=='steady')
                 self.rest_error=None;failures=0
             except Exception as exc:
-                self.rest_error='White brightness update failed: '+str(exc)
+                self.rest_error='Background light update failed: '+str(exc)
                 failures=min(7,failures+1)
 
     async def apply(self, elapsed=0, *, only_if_running=False):
@@ -158,7 +186,12 @@ class Engine:
                 await self.rest_music(self.lights)
                 return
             if self.settings.mode in STREAM_MODES:
-                if self.stream is None: raise ValueError('Click Start to initialize Hue Entertainment for beat effects')
+                if self.stream is None:
+                    if any(light.enabled and light.color for light in self.lights):
+                        raise ValueError('Click Start to initialize Hue Entertainment for beat effects')
+                    if self.status=='starting':
+                        await self.rest_music([light for light in self.lights if not light.color],steady=self.settings.white_response=='steady',force=True)
+                    return
                 bpm,phase_at=self.beat_clock()
                 now=time.monotonic(); low=self.settings.flash_low/100
                 self.collect_drops(now)
@@ -230,43 +263,52 @@ class Engine:
             if self.stream:
                 stream=self.stream;self.stream=None
                 await stream.stop()
-            self.rest_brightness.clear();self.rest_error=None
+            self.rest_brightness.clear();self.rest_off.clear();self.rest_error=None
 
     async def start(self):
         async with self.lifecycle_lock:
             await self._start()
 
-    async def _start(self):
+    async def _start(self, *, allow_empty=False):
+        was_waiting=self.status=='waiting_audio'
+        restored=self.waiting_restored
         self.reset_audio_wait()
         self.status='starting'
         had_snapshot=self.snapshot is not None
         try:
             await self._stop_stream()
+            if was_waiting and not restored:
+                await self._restore_snapshot(clear=False)
             await self.refresh()
-            if not any(light.enabled for light in self.lights):
+            enabled=any(light.enabled for light in self.lights)
+            colors=any(light.enabled and light.color for light in self.lights)
+            if not enabled and not allow_empty:
                 raise ValueError('No bulbs are enabled. Select Enable bulb or Enable all four in Your lights, then click Start.')
-            if self.settings.mode=='music_brightness' and not any(light.enabled and light.dimming for light in self.lights):
+            if enabled and self.settings.mode=='music_brightness' and not any(light.enabled and light.dimming for light in self.lights):
                 raise ValueError('Enable at least one dimmable bulb for music brightness.')
-            if self.uses_audio_hits() and not (self.audio and self.audio.running):
+            if colors and self.uses_audio_hits() and not (self.audio and self.audio.running):
                 raise ValueError('Start listening to BlackHole before using audio-triggered pulses or flashes. A BPM estimate is not required.')
             silent=self.follows_audio() and (self.audio.music_energy() or 0)<.00005
-            if not silent and self.settings.mode in STREAM_MODES and self.pulse_trigger()=='bpm' and self.beat_clock()[0] is None:
+            if colors and not silent and self.settings.mode in STREAM_MODES and self.pulse_trigger()=='bpm' and self.beat_clock()[0] is None:
                 raise ValueError('Listening is not running, so there is no tempo yet. Choose a manual tempo or check Audio setup.')
-            if self.snapshot is None: self.snapshot=[]
-            captured={light.id for light in self.snapshot}
-            self.snapshot.extend(light.model_copy(deep=True) for light in self.lights if light.enabled and light.id not in captured)
             if silent:
-                if had_snapshot:await self._restore_snapshot(clear=False)
+                if had_snapshot and not was_waiting:await self._restore_snapshot(clear=False)
                 self.status='waiting_audio'
                 self.playback_message='Waiting for music. Lights remain in their original state.'
                 return
+            # A lamp can be changed while music is stopped. Save the bridge's
+            # current state immediately before playback takes control again;
+            # silent Start must not freeze a state that may later change.
+            if was_waiting:self.snapshot=None
+            self.capture_snapshot()
             self.started=time.monotonic()
-            if self.settings.mode in STREAM_MODES:
+            if self.settings.mode in STREAM_MODES and (colors or not allow_empty):
                 stream=self.stream_factory(self.client)
                 await stream.start(self.lights)
                 self.stream=stream
             self.hit_flashes.reset(getattr(self.audio,'hit_counter',0));self.beat_lock.reset(getattr(self.audio,'hit_counter',0))
             self.drop_cursor=getattr(self.audio,'drop_counter',0);self.palette_shift=0;self.drop_until=0
+            await self.off_unselected()
             await self.apply()
         except Exception as exc:
             self.status='stopped';self.error=str(exc)
@@ -276,6 +318,17 @@ class Engine:
         self.status='running';self.error=None
         self.white_task=asyncio.create_task(self.white_music())
         self.wake.set()
+
+    async def reconfigure_lights(self):
+        async with self.lifecycle_lock:
+            if self.status!='running': return
+            if self.settings.mode in STREAM_MODES:
+                # Removing the last color bulb releases Entertainment while the
+                # slow worker continues to keep unselected bulbs off.
+                await self._start(allow_empty=True)
+            else:
+                await self.off_unselected()
+                await self.apply(only_if_running=True)
 
 
     async def pause(self):
