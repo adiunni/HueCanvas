@@ -1,6 +1,28 @@
 # HueCanvas
 A local album-art-driven lighting dashboard for two color Hue bulbs and two warm-white bulbs. Python 3.11+; mock mode is the default. This repository itself is the project root—no extra huecanvas folder is needed.
 
+## Musical events and final impacts
+
+The existing dashboard now includes **Event Detection**: saved manual cues,
+cached local WAV analysis, candidate review, effect preview/audition, an optional
+local audio player and cue clock, plus opt-in reactive live detection. Seven event
+types map to five album-palette effects. Reduced motion and slow REST output are
+the defaults; color-only Entertainment output is optional. White bulbs retain
+their separate slow brightness worker. Audio analysis/cue playback never opens
+capture on its own.
+
+For a quick mock test, choose **Ambient → Static**, open Event Detection, enable
+event effects, save a manual **FINAL_IMPACT** at **5 seconds**, reset the cue clock
+to 0, and press **Start**. **Audition lights** tries the editor's effect immediately;
+**Restore** returns the original light states. Five seconds is a demonstration
+cue, not a claimed timestamp for any song.
+
+See [the repository audit, full setup and reference-song workflow](docs/events.md)
+for accepted/rejected cues, timing controls, exact-recording annotations and
+hardware checks. Detection scores are heuristic. Current validation is synthetic
+and mock-based; physical lamp synchronization, Music position scripting and the
+requested extended recording still need real-world validation.
+
 ## Setup and run
 ```sh
 cd /Users/adiunni/Github/HueCanvas

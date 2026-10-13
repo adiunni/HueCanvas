@@ -171,6 +171,61 @@
   <small>Preview only: band colors do not change the lights. This shows the mixed audio, not isolated instruments. No audio is saved.</small>
 </details>
 
+<details class="panel event-panel" id="eventsPanel">
+  <summary><h2>Event Detection</h2><span class="summary-note">Musical moments and editable cues</span></summary>
+  <p>Place a final impact, review detected sections, and shape the lighting around your album palette. Candidates need acceptance before scheduled playback.</p>
+  <div class="event-grid">
+    <label><input id="eventEnabled" type="checkbox"> Enable event effects</label>
+    <label><input id="eventReduced" type="checkbox" checked> Reduced motion</label>
+    <label>Color output<select id="eventOutput"><option value="rest">Slow REST transitions</option><option value="entertainment">Entertainment · 20 fps</option></select></label>
+    <label>Resting brightness · fraction of ceiling<input id="eventAmbient" type="number" min="0.05" max="1" step="0.05" value="0.3"></label>
+  </div>
+  <p class="fine">White lamps use brightness only, at most once every two seconds. Effects stay within your brightness ceilings. Event presets contain no strobe.</p>
+  <div class="event-grid">
+    <label>Track identifier<input id="eventTrack" type="text" maxlength="300" value="manual"></label>
+    <div class="row"><button id="eventLoad">Load cues</button><button id="eventCurrent">Use current song</button></div>
+    <label>Authorized local audio · WAV<input id="eventFile" type="file" accept=".wav,audio/wav"></label>
+    <div class="row"><button id="eventAnalyze">Analyze track</button></div>
+  </div>
+  <audio id="eventPlayer" controls preload="metadata" hidden></audio>
+  <p class="fine">WAV only, up to 128 MB / 20 minutes. Audio stays local; only features and edits are cached. This player feeds the cue clock. Press Start above to run the lights; playback and analysis do not start capture.</p>
+  <div class="event-grid">
+    <label>Cue clock position · seconds<input id="eventPosition" type="number" min="0" max="86400" step="0.01" value="0"></label>
+    <label>Playback rate<input id="eventRate" type="number" min="0.25" max="4" step="0.05" value="1"></label>
+    <label>Loop start · seconds (optional)<input id="eventLoopStart" type="number" min="0" step="0.01"></label>
+    <label>Loop end · seconds (optional)<input id="eventLoopEnd" type="number" min="1" step="0.01"></label>
+  </div>
+  <div class="row"><button id="eventPlay">Run cue clock</button><button id="eventPause">Pause cue clock</button><button id="eventSeek">Seek / apply rate &amp; loop</button><label><input id="eventFollow" type="checkbox"> Follow Apple Music position</label></div>
+  <p class="fine">Cue clock buttons do not control Music or rekordbox. rekordbox has no reliable playhead telemetry here: use live detection or synchronize this clock manually. Apple Music following is approximate and requires Music integration.</p>
+  <div class="event-grid">
+    <label>Confidence threshold<input id="eventConfidence" type="number" min="0.1" max="1" step="0.01" value="0.7"></label>
+    <label>Advance known cues · ms<input id="eventLatency" type="number" min="0" max="1000" step="10" value="0"></label>
+    <label><input id="eventLive" type="checkbox"> Detect live candidates while listening</label>
+    <label><input id="eventLiveTrigger" type="checkbox"> Trigger live effects automatically</label>
+    <label><input id="eventBeat" type="checkbox"> Align live effects to the next beat</label>
+    <label>Additional live delay · ms<input id="eventLiveDelay" type="number" min="0" max="1000" step="10" value="0"></label>
+  </div>
+  <p id="eventStatus" class="hint" role="status">No track analyzed.</p>
+  <p class="fine">Live detection confirms events after they happen. Confidence is a heuristic score; live endings are provisional. Advance compensates known output delay only. Compare an audition with audible playback and tune it manually.</p>
+  <div id="eventList" class="event-list" aria-label="Saved musical events"></div>
+  <h3>Cue editor</h3>
+  <div class="event-grid">
+    <label>Event type<select id="cueType"><option>FINAL_IMPACT</option><option>DROP</option><option>BUILD_START</option><option>BUILD_END</option><option>BREAKDOWN</option><option>OUTRO_START</option><option>TRACK_END</option></select></label>
+    <label>Timestamp · seconds<input id="cuePosition" type="number" min="0" max="86400" step="0.01" value="5"></label>
+    <label>Effect<select id="cueEffect"><option>CINEMATIC_IMPACT</option><option>DROP_RELEASE</option><option>BUILD_RAMP</option><option>FINAL_RESOLUTION</option><option>OUTRO_FADE</option></select></label>
+    <label>Attack · seconds<input id="cueAttack" type="number" min="0.05" max="30" step="0.05" value="0.25"></label>
+    <label>Hold · seconds<input id="cueHold" type="number" min="0" max="30" step="0.1" value="0.6"></label>
+    <label>Decay · seconds<input id="cueDecay" type="number" min="1" max="120" step="0.5" value="5"></label>
+    <label>Intensity<input id="cueIntensity" type="number" min="0" max="1" step="0.05" value="0.65"></label>
+    <label>Known cue pre-dim · seconds<input id="cuePreDim" type="number" min="0" max="4" step="0.1" value="0"></label>
+    <label><input id="cueEnabled" type="checkbox" checked> Cue enabled</label>
+  </div>
+  <div class="row"><button id="cueNew">New manual cue</button><button id="cueMark">Use playhead time</button><button id="cueSave" class="primary">Save cue</button><button id="cuePreview">Preview on screen</button><button id="cueAudition">Audition lights</button></div>
+  <p id="cueEditing" class="fine">New manual final-impact cue.</p>
+  <div id="eventPreview" class="event-preview" aria-label="Effect preview"></div>
+  <h3>Live candidates</h3><div id="eventLiveList" class="event-list"></div>
+</details>
+
 <details class="panel setup" id="setupPanel">
   <summary><h2>Setup</h2><span class="summary-note" id="setupSummary">Audio input, bridge and music source</span></summary>
   <h3>Audio input</h3>
@@ -186,4 +241,4 @@
   <p id="connectionInfo">Simulation works without a Hue Bridge, Apple Music or rekordbox. Fast beat effects use Hue Entertainment streaming.</p>
 </details>
 </main>
-<div id="notice" role="status" aria-live="polite"></div><script src="/static/app.js"></script><script src="/static/spectrum.js"></script></body></html>
+<div id="notice" role="status" aria-live="polite"></div><script src="/static/app.js"></script><script src="/static/spectrum.js"></script><script src="/static/events.js"></script></body></html>

@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "title": "Swedish House Mafia - Don't You Worry Child",
+  "edition": "USER MUST IDENTIFY THE EXACT EXTENDED VERSION",
+  "audio_sha256": null,
+  "duration_seconds": null,
+  "tolerance_seconds": 0.25,
+  "events": [
+    {"type": "FINAL_IMPACT", "position_seconds": null, "notes": "Annotate by listening to the supplied authorized file; leave absent if no distinct final hit."}
+  ]
+}

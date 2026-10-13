@@ -10,6 +10,7 @@ from app.palette.gamut import map_gamut
 from app.animation.modes import frame
 from app.animation.beats import BeatLock, clock_gentle_factors, clock_flash_factors, HitFlashes, palette_color
 from app.animation.music_brightness import grouped_beat_factor, grouped_beat_factors, energy_factor
+from app.events.runtime import EventRuntime
 
 class Engine:
     def __init__(self, client):
@@ -25,6 +26,19 @@ class Engine:
         self.silence_since=None;self.sound_since=None;self.audio_checked_at=-float('inf')
         self.waiting_restored=True;self.playback_message=None
         self.drop_cursor=0;self.palette_shift=0;self.drop_until=0
+        self.events=EventRuntime();self.event_rest={};self.event_frame_at=-float('inf')
+
+    def streaming_requested(self):
+        return self.settings.mode in STREAM_MODES or (self.events.options.enabled and self.events.options.output=='entertainment' and self.settings.mode!='music_brightness')
+
+    def event_target(self, color, brightness, light, now):
+        if not self.events.options.enabled:return color,brightness
+        target=self.events.sample(now,slow=not light.color or self.stream is None,bpm=self.beat_clock()[0])
+        ceiling=self.settings.brightness if light.color else self.settings.white_fill
+        if target is None:return color,(ceiling if self.events.options.reduced_motion else brightness)*.65
+        if target['motion'] and light.color:
+            color=palette_color(self.palette,target['motion'],1 if light.role=='COLOR_RIGHT' else 0)
+        return color,ceiling*target['level']
 
     def uses_audio_hits(self):
         return self.settings.mode in STREAM_MODES and self.settings.flash_trigger!='bpm'
@@ -40,7 +54,7 @@ class Engine:
         return bool(self.audio and self.audio.running and hasattr(self.audio,'music_energy'))
 
     def white_music_active(self):
-        return self.settings.mode in STREAM_MODES or (
+        return self.events.options.enabled or self.settings.mode in STREAM_MODES or (
             self.settings.mode!='music_brightness' and self.settings.white_response=='music' and self.follows_audio())
 
     def reset_audio_wait(self):
@@ -66,6 +80,12 @@ class Engine:
                 if now-self.silence_since<2:return
                 self.status='waiting_audio';self.waiting_restored=False;self.sound_since=None
             if not self.waiting_restored:
+                # Let an intentional final decay finish before restoring after silence.
+                if self.events.options.enabled and self.events.paused_at is None:
+                    target=self.events.sample(now,slow=True)
+                    if self.events.active and target is not None and not target['done']:
+                        self.status='running'
+                        return
                 await self._stop_stream()
                 await self._restore_snapshot(clear=False)
                 self.waiting_restored=True
@@ -104,6 +124,7 @@ class Engine:
         return energy_factor(energy,low) if energy is not None else 1
 
     def collect_drops(self,now):
+        if self.events.options.enabled and self.events.options.live_trigger:return
         if not self.audio or not hasattr(self.audio,'recent_drops'):return
         for drop in self.audio.recent_drops(self.drop_cursor):
             self.drop_cursor=drop['id']
@@ -154,14 +175,17 @@ class Engine:
                 white_factors=dict(zip((l.id for l in whites),grouped_beat_factors(bpm,phase_at,now,len(whites),'staggered',white_low)))
             for light in lights:
                 if not light.enabled or not light.dimming: continue
+                if self.events.options.enabled and now-self.event_rest.get(light.id,-float('inf'))<2:continue
                 peak=self.settings.brightness if light.color else self.settings.white_fill
                 brightness=max(1,round(peak*white_factors.get(light.id,factor if light.color else white_factor),1))
+                _,brightness=self.event_target(None,brightness,light,now)
                 previous=self.rest_brightness.get(light.id)
                 if previous and not force:
                     if now-previous[1]<2 or abs(brightness-previous[0])<1: continue
                 await self.client.update(light.id,command(light,brightness,duration=1))
                 light.on=True;light.brightness=brightness
                 self.rest_brightness[light.id]=(brightness,time.monotonic())
+                self.event_rest[light.id]=time.monotonic()
 
     async def white_music(self):
         failures=0
@@ -182,6 +206,8 @@ class Engine:
     async def apply(self, elapsed=0, *, only_if_running=False):
         async with self.lock:
             if only_if_running and self.status!='running': return
+            now=time.monotonic();self.events.tick(now)
+            if self.events.options.enabled and self.stream and now-self.event_frame_at<.05-1e-9:return
             if self.settings.mode=='music_brightness':
                 await self.rest_music(self.lights)
                 return
@@ -231,14 +257,17 @@ class Engine:
                     if self.settings.pulse_palette=='cycle':
                         position=(now-self.started)/(self.settings.palette_every*60/bpm) if bpm else (now-self.started)/self.settings.speed
                         color=palette_color(self.palette,position+self.palette_shift,offset)
-                    xy=map_gamut(hex_to_xy(color),light.gamut)
                     brightness=self.settings.brightness*factor
+                    color,brightness=self.event_target(color,brightness,light,now)
+                    xy=map_gamut(hex_to_xy(color),light.gamut)
                     values[light.id]=(*xy,brightness/100)
                     light.on=True;light.xy=xy;light.brightness=brightness;light.preview_color=color
                 await self.stream.send(values)
+                self.event_frame_at=time.monotonic()
                 return
             if self.status=='starting' and self.white_music_active():
                 await self.rest_music([light for light in self.lights if not light.color],force=True)
+            values={}
             for light in self.lights:
                 if not light.enabled or (not light.color and self.white_music_active()): continue
                 offset=1 if light.role in ('COLOR_RIGHT','WHITE_RIGHT') else 0
@@ -249,10 +278,21 @@ class Engine:
                         factor=.75+.25*math.sin(2*math.pi*(time.monotonic()-phase_at)/max(4,960/bpm))
                     else: factor=1
                 brightness=(self.settings.brightness if light.color else self.settings.white_fill)*factor
+                color,brightness=self.event_target(color,brightness,light,now)
+                if self.stream and light.color:
+                    xy=map_gamut(hex_to_xy(color),light.gamut)
+                    values[light.id]=(*xy,brightness/100)
+                    light.on=True;light.xy=xy;light.brightness=brightness;light.preview_color=color
+                    continue
+                if self.events.options.enabled and now-self.event_rest.get(light.id,-float('inf'))<2:continue
                 payload=command(light,brightness,color,self.settings.transition)
                 await self.client.update(light.id,payload)
+                self.event_rest[light.id]=time.monotonic()
                 light.on=True;light.brightness=brightness;light.preview_color=color if light.color else None
                 if 'color' in payload: light.xy=list(payload['color']['xy'].values())
+            if values:
+                await self.stream.send(values)
+                self.event_frame_at=time.monotonic()
 
     async def _stop_stream(self):
         if self.white_task:
@@ -302,12 +342,16 @@ class Engine:
             if was_waiting:self.snapshot=None
             self.capture_snapshot()
             self.started=time.monotonic()
-            if self.settings.mode in STREAM_MODES and (colors or not allow_empty):
+            if self.streaming_requested() and (colors or (not allow_empty and self.settings.mode in STREAM_MODES)):
                 stream=self.stream_factory(self.client)
                 await stream.start(self.lights)
                 self.stream=stream
             self.hit_flashes.reset(getattr(self.audio,'hit_counter',0));self.beat_lock.reset(getattr(self.audio,'hit_counter',0))
             self.drop_cursor=getattr(self.audio,'drop_counter',0);self.palette_shift=0;self.drop_until=0
+            if self.events.options.enabled:
+                now=time.monotonic()
+                t=self.events.clock.transport.model_copy(update={'position':self.events.clock.position(now),'playing':True,'seek':False})
+                self.events.transport(t,now)
             await self.off_unselected()
             await self.apply()
         except Exception as exc:
@@ -322,7 +366,7 @@ class Engine:
     async def reconfigure_lights(self):
         async with self.lifecycle_lock:
             if self.status!='running': return
-            if self.settings.mode in STREAM_MODES:
+            if self.streaming_requested():
                 # Removing the last color bulb releases Entertainment while the
                 # slow worker continues to keep unselected bulbs off.
                 await self._start(allow_empty=True)
@@ -333,10 +377,19 @@ class Engine:
 
     async def pause(self):
         async with self.lifecycle_lock:
+            self.events.follow_paused=False
+            self.pause_events()
             self.status='paused';self.reset_audio_wait();await self._stop_stream()
+
+    def pause_events(self):
+        now=time.monotonic()
+        t=self.events.clock.transport.model_copy(update={'position':self.events.clock.position(now),'playing':False,'seek':False})
+        self.events.transport(t,now)
 
     async def stop(self):
         async with self.lifecycle_lock:
+            self.events.follow_paused=False
+            self.pause_events();self.events.clear()
             self.status='stopped';self.reset_audio_wait();await self._stop_stream()
 
     async def _restore_snapshot(self, *, clear=True):
@@ -350,13 +403,15 @@ class Engine:
 
     async def restore(self):
         async with self.lifecycle_lock:
+            self.events.follow_paused=False
+            self.pause_events();self.events.clear()
             self.status='stopped';self.reset_audio_wait();await self._stop_stream()
             await self._restore_snapshot()
 
     async def run(self):
         failures=0
         while True:
-            interval=.05 if self.status=='running' and self.settings.mode in STREAM_MODES else .25 if self.follows_audio() or (self.status=='running' and self.settings.mode=='music_brightness') else 2
+            interval=.05 if self.status=='running' and (self.streaming_requested() or self.events.options.enabled) else .25 if self.follows_audio() or (self.status=='running' and self.settings.mode=='music_brightness') else 2
             try:
                 await asyncio.wait_for(self.wake.wait(),timeout=min(30,interval*2**failures))
             except asyncio.TimeoutError:
@@ -364,7 +419,7 @@ class Engine:
             self.wake.clear()
             try:
                 await self.check_audio()
-                if self.status!='running' or self.settings.mode=='static':
+                if self.status!='running' or (self.settings.mode=='static' and not self.events.options.enabled):
                     failures=0
                     continue
                 await self.apply(time.monotonic()-self.started,only_if_running=True)

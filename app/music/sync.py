@@ -26,14 +26,17 @@ def normalize_artwork(data):
 
 
 class ArtworkSync:
-    def __init__(self,provider,directory,on_update,*,poll_interval=.5,palette_size=lambda:4):
+    def __init__(self,provider,directory,on_update,*,poll_interval=.5,palette_size=lambda:4,on_transport=None):
         self.provider=provider;self.directory=Path(directory);self.on_update=on_update;self.palette_size=palette_size
         self.poll_interval=poll_interval;self.current=None;self.generation=0
         self.worker=None;self.loaded=False;self.retry_at=0;self.palette_cache=OrderedDict()
+        self.on_transport=on_transport
 
     async def poll_once(self):
         track=await self.provider.current_track()
-        if not track.get('available'):return
+        if not track.get('available'):
+            if self.on_transport:await self.on_transport(track)
+            return
         key=identity(track)
         if key!=self.current:
             self.current=key;self.generation+=1;self.loaded=False;self.retry_at=0
@@ -41,6 +44,7 @@ class ArtworkSync:
                 self.worker.cancel()
                 with suppress(asyncio.CancelledError):await self.worker
             await self.on_update('track',track)
+        if self.on_transport:await self.on_transport(track)
         if not self.loaded and (not self.worker or self.worker.done()) and time.monotonic()>=self.retry_at:
             self.worker=asyncio.create_task(self.load(track,key,self.generation))
 

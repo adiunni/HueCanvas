@@ -4,6 +4,7 @@ import json
 import os
 import httpx
 import re
+import time
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from fastapi import FastAPI, HTTPException, UploadFile, File, Query, Request
@@ -28,6 +29,8 @@ from app.music.sync import ArtworkSync
 from app.audio.live import LiveBPM, input_devices
 from app.audio.routing import routing_status, set_music_output
 from app.hue.entertainment import STREAM_MODES
+from app.events.api import create_router, live_worker, refresh_cues
+from app.events.models import TransportUpdate
 
 STATIC = Path(__file__).parent/'static'
 engine = None
@@ -87,6 +90,11 @@ async def music_update(kind,value):
     if kind=='track':
         music_track=value;artwork=None;music_error=None
         if audio.running and hasattr(audio,'track_changed'):audio.track_changed()
+        # Identity changes always discard the previous track's active effect.
+        if engine:
+            t=TransportUpdate(track_id=str(value.get('id') or value.get('track') or 'manual'),position=float(value.get('position',0)))
+            engine.events.transport(t,time.monotonic())
+            refresh_cues(engine)
     elif kind=='artwork':artwork=value;music_error=None
     elif kind=='palette':engine.palette=value;music_error=None
     elif kind=='error':music_error='Music artwork unavailable; upload manually. '+value
@@ -97,8 +105,28 @@ async def music_update(kind,value):
 
 
 async def music_sync():
-    sync=ArtworkSync(music,config.DATA_DIR,music_update,palette_size=lambda:engine.settings.palette_size)
+    sync=ArtworkSync(music,config.DATA_DIR,music_update,palette_size=lambda:engine.settings.palette_size,on_transport=music_transport)
     await sync.run()
+
+
+async def music_transport(track):
+    if not engine or not engine.events.options.follow_music:return
+    now=time.monotonic()
+    if not track.get('available'):
+        if engine.status=='running':
+            await engine.pause();engine.events.follow_paused=True
+        return
+    # History and faders are not position telemetry. Never invent a rekordbox clock.
+    if 'position' not in track:return
+    engine.events.transport(TransportUpdate(track_id=str(track['id']),position=track['position'],
+        playing=bool(track.get('playing')),rate=float(track.get('rate',1))),now)
+    refresh_cues(engine)
+    if not track.get('playing') and engine.status=='running':
+        await engine.pause();engine.events.follow_paused=True
+    elif track.get('playing') and engine.events.follow_paused:
+        engine.events.follow_paused=False
+        await engine.start()
+    engine.wake.set()
 
 @asynccontextmanager
 async def lifespan(app):
@@ -113,9 +141,10 @@ async def lifespan(app):
         await engine.refresh()
     except Exception as exc: engine.error = str(exc)
     task = asyncio.create_task(engine.run())
+    event_task = asyncio.create_task(live_worker(engine,audio))
     music_task = asyncio.create_task(music_sync()) if config.MUSIC_ENABLED else None
     yield
-    for t in (task,music_task):
+    for t in (task,music_task,event_task):
         if t:
             t.cancel()
             with suppress(asyncio.CancelledError): await t
@@ -126,6 +155,7 @@ async def lifespan(app):
     await engine.client.close()
 
 app = FastAPI(title='HueCanvas', lifespan=lifespan)
+app.include_router(create_router(lambda:engine))
 @app.middleware('http')
 async def local_write_guard(request: Request, call_next):
     if request.method not in ('GET','HEAD','OPTIONS'):
